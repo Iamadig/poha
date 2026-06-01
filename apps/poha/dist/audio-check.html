@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Poha Audio Check</title>
+    <style>
+      :root {
+        --bg: #f5f3ed;
+        --ink: #181713;
+        --muted: #69655c;
+        --line: #ded9cc;
+        --panel: #fffef9;
+        --accent: #11110f;
+        --ok: #17653a;
+        --bad: #a22b2b;
+        --warn: #9a6a00;
+        --fill: #e2d7bd;
+        --font: "Avenir Next", "SF Pro Text", "Helvetica Neue", sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-width: 420px;
+        min-height: 300px;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: var(--font);
+        letter-spacing: 0;
+        overflow: hidden;
+      }
+
+      .shell {
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        min-height: 100vh;
+        padding: 18px;
+        gap: 14px;
+      }
+
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+      }
+
+      .brand {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+
+      .eyebrow {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 22px;
+        line-height: 1.1;
+      }
+
+      .close {
+        width: 32px;
+        height: 32px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--panel);
+        color: var(--muted);
+        cursor: pointer;
+        font-size: 18px;
+        line-height: 1;
+      }
+
+      main {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        padding: 18px;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+
+      .phase {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 14px;
+      }
+
+      .title {
+        font-size: 28px;
+        font-weight: 800;
+        line-height: 1.05;
+      }
+
+      .timer {
+        min-width: 54px;
+        text-align: right;
+        font-size: 42px;
+        font-weight: 800;
+        line-height: 1;
+      }
+
+      .detail {
+        min-height: 38px;
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.35;
+      }
+
+      .phrase {
+        min-height: 58px;
+        border-left: 4px solid var(--accent);
+        padding-left: 12px;
+        display: flex;
+        align-items: center;
+        font-size: 26px;
+        font-weight: 800;
+        line-height: 1.1;
+      }
+
+      .phrase:empty {
+        border-color: transparent;
+      }
+
+      .bar {
+        height: 8px;
+        border-radius: 999px;
+        background: #e9e4d8;
+        overflow: hidden;
+      }
+
+      .bar > div {
+        width: 0%;
+        height: 100%;
+        background: var(--accent);
+        transition: width 220ms ease;
+      }
+
+      .status {
+        min-height: 20px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.3;
+      }
+
+      .status.passed {
+        color: var(--ok);
+      }
+
+      .status.failed {
+        color: var(--bad);
+      }
+
+      footer {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+
+      button {
+        border: 1px solid var(--accent);
+        border-radius: 6px;
+        background: var(--accent);
+        color: white;
+        padding: 8px 11px;
+        font: inherit;
+        cursor: pointer;
+      }
+
+      button.secondary {
+        border-color: var(--line);
+        background: var(--panel);
+        color: var(--ink);
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.45;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <header>
+        <div class="brand">
+          <div class="eyebrow">Poha</div>
+          <h1>Audio Check</h1>
+        </div>
+        <button class="close" id="closeButton" aria-label="Close">x</button>
+      </header>
+
+      <main>
+        <div class="phase">
+          <div class="title" id="title">Waiting</div>
+          <div class="timer" id="timer"></div>
+        </div>
+        <div class="detail" id="detail">Start the guided check from the Poha tray.</div>
+        <div class="phrase" id="phrase"></div>
+        <div class="bar" aria-hidden="true"><div id="progress"></div></div>
+        <div class="status" id="status"></div>
+      </main>
+
+      <footer>
+        <button class="secondary" id="openFolder" disabled>Open Folder</button>
+        <button class="secondary" id="openReport" disabled>Open Report</button>
+        <button id="runAgain" disabled>Run Again</button>
+      </footer>
+    </div>
+
+    <script>
+      const tauri = window.__TAURI__ || {};
+      const invoke = tauri.core?.invoke || tauri.tauri?.invoke;
+      const listen = tauri.event?.listen;
+      const currentWindow = tauri.window?.getCurrentWindow?.();
+
+      const el = {
+        title: document.getElementById("title"),
+        timer: document.getElementById("timer"),
+        detail: document.getElementById("detail"),
+        phrase: document.getElementById("phrase"),
+        progress: document.getElementById("progress"),
+        status: document.getElementById("status"),
+        openFolder: document.getElementById("openFolder"),
+        openReport: document.getElementById("openReport"),
+        runAgain: document.getElementById("runAgain"),
+        closeButton: document.getElementById("closeButton"),
+      };
+
+      let state = null;
+
+      const render = (next) => {
+        state = next || state;
+        if (!state) return;
+
+        const progress = Math.max(0, Math.min(1, Number(state.progress || 0)));
+        el.title.textContent = state.title || "Audio Check";
+        el.detail.textContent = state.detail || "";
+        el.phrase.textContent = state.phrase || "";
+        el.timer.textContent = state.secondsRemaining ? String(state.secondsRemaining) : "";
+        el.progress.style.width = `${Math.round(progress * 100)}%`;
+
+        const status = state.status || "";
+        el.status.className = `status ${status}`;
+        if (status === "passed") {
+          el.status.textContent = "Passed. The report is ready.";
+        } else if (status === "failed") {
+          const failures = Array.isArray(state.failures) && state.failures.length
+            ? ` Failed: ${state.failures.join(", ")}.`
+            : "";
+          el.status.textContent = `Needs attention.${failures}`;
+        } else {
+          el.status.textContent = state.phase ? state.phase.replace(/([A-Z])/g, " $1") : "";
+        }
+
+        el.openFolder.disabled = !state.outputDir;
+        el.openReport.disabled = !state.reportMarkdownPath;
+        el.runAgain.disabled = !["complete", "idle", "failed", "passed"].includes(state.phase);
+      };
+
+      const openPath = async (path) => {
+        if (!invoke || !path) return;
+        await invoke("open_path", { path });
+      };
+
+      el.openFolder.addEventListener("click", () => openPath(state?.outputDir));
+      el.openReport.addEventListener("click", () => openPath(state?.reportMarkdownPath));
+      el.runAgain.addEventListener("click", async () => {
+        if (!invoke) return;
+        el.runAgain.disabled = true;
+        await invoke("run_guided_audio_test");
+      });
+      el.closeButton.addEventListener("click", async () => {
+        if (currentWindow?.close) {
+          await currentWindow.close();
+        } else {
+          window.close();
+        }
+      });
+
+      const boot = async () => {
+        if (invoke) {
+          const initial = await invoke("get_audio_check_state");
+          if (initial) render(initial);
+        }
+        if (listen) {
+          await listen("audio-check-state", (event) => render(event.payload));
+        }
+      };
+
+      boot().catch((error) => {
+        el.title.textContent = "Window error";
+        el.detail.textContent = String(error);
+      });
+    </script>
+  </body>
+</html>

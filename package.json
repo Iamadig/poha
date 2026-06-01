@@ -1,0 +1,23 @@
+{
+  "name": "poha",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "fmt": "dprint fmt",
+    "cargo:check": "cargo check --manifest-path apps/poha/src-tauri/Cargo.toml",
+    "poha:dev": "pnpm -F poha tauri:dev",
+    "poha:build": "pnpm -F poha tauri:build",
+    "test:cli": "cargo test --manifest-path apps/poha/src-tauri/Cargo.toml --bin poha-cli -- --nocapture",
+    "test:lib": "cargo test --manifest-path apps/poha/src-tauri/Cargo.toml --lib -- --nocapture",
+    "test:transcription": "cargo test --manifest-path apps/poha/src-tauri/Cargo.toml transcription -- --nocapture",
+    "verify": "pnpm cargo:check && pnpm test:cli && pnpm test:lib"
+  },
+  "devDependencies": {
+    "dprint": "^0.51.1",
+    "oxfmt": "^0.45.0"
+  },
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,0 +1,2567 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Poha</title>
+    <style>
+      :root {
+        --bg: #f7f7f4;
+        --panel: #ffffff;
+        --panel-soft: #fbfbf8;
+        --ink: #171717;
+        --muted: #6f6f68;
+        --line: #e4e4dd;
+        --line-strong: #d1d1c9;
+        --accent: #111111;
+        --hover: #f0f0ea;
+        --focus: rgba(17, 17, 17, 0.12);
+        --shadow: 0 10px 30px rgba(20, 20, 15, 0.08);
+        --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+          sans-serif;
+        --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-width: 980px;
+        min-height: 680px;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: var(--font-sans);
+        letter-spacing: 0;
+        overflow: hidden;
+      }
+
+      button,
+      input,
+      textarea {
+        font: inherit;
+      }
+
+      button {
+        border: 1px solid var(--accent);
+        border-radius: 6px;
+        padding: 8px 11px;
+        background: var(--accent);
+        color: white;
+        cursor: pointer;
+      }
+
+      button.secondary {
+        border-color: var(--line-strong);
+        background: var(--panel);
+        color: var(--ink);
+      }
+
+      button.compact {
+        padding: 7px 10px;
+      }
+
+      button.danger {
+        border-color: #a63a3a;
+        background: #fff6f4;
+        color: #8f1f1f;
+      }
+
+      button.danger:hover {
+        background: #ffeae6;
+      }
+
+      button.ghost {
+        background: transparent;
+        color: var(--ink);
+        padding: 6px 0;
+      }
+
+      button.text-button {
+        border-color: transparent;
+        background: transparent;
+        color: var(--muted);
+        padding: 4px 0;
+        text-align: left;
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
+
+      input,
+      textarea {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--panel);
+        color: var(--ink);
+        padding: 8px 10px;
+        outline: none;
+      }
+
+      textarea {
+        min-height: 78px;
+        resize: vertical;
+      }
+
+      input:focus,
+      textarea:focus {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px var(--focus);
+      }
+
+      .app {
+        display: grid;
+        grid-template-columns: 218px minmax(320px, 380px) minmax(440px, 1fr);
+        gap: 0;
+        height: 100vh;
+        overflow: hidden;
+      }
+
+      .app > * {
+        min-width: 0;
+        min-height: 0;
+      }
+
+      .sidebar {
+        background: var(--panel-soft);
+        border-right: 1px solid var(--line);
+        color: var(--ink);
+        padding: 18px;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        min-height: 0;
+        overflow: hidden;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding-bottom: 4px;
+      }
+
+      .mark {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--accent);
+      }
+
+      .brand-title {
+        font-size: 18px;
+        font-weight: 650;
+        line-height: 1;
+      }
+
+      .archive-stats {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        padding: 9px;
+      }
+
+      .archive-stat {
+        min-width: 0;
+      }
+
+      .archive-stat-value {
+        color: var(--ink);
+        font-size: 18px;
+        font-weight: 750;
+        font-variant-numeric: tabular-nums;
+        line-height: 1;
+      }
+
+      .archive-stat-label {
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.15;
+      }
+
+      .sidebar label,
+      .field label,
+      .speaker-row label {
+        display: block;
+        margin-bottom: 6px;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .sidebar label {
+        color: var(--muted);
+      }
+
+      .sidebar input {
+        background: var(--panel);
+        border-color: var(--line);
+        color: var(--ink);
+      }
+
+      .sidebar input::placeholder {
+        color: #a0a09a;
+      }
+
+      .context-shell {
+        display: flex;
+        flex: 1 1 auto;
+        min-height: 0;
+        flex-direction: column;
+      }
+
+      .context-list {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-y: auto;
+        overflow-x: hidden;
+        overscroll-behavior: contain;
+        scrollbar-gutter: stable;
+        display: grid;
+        align-content: start;
+        gap: 6px;
+        padding-right: 2px;
+      }
+
+      .context-card {
+        width: 100%;
+        border: 1px solid transparent;
+        background: transparent;
+        color: var(--ink);
+        padding: 9px 10px;
+        text-align: left;
+        min-width: 0;
+      }
+
+      .context-card:hover,
+      .context-card.active {
+        background: var(--hover);
+        border-color: var(--line-strong);
+      }
+
+      .context-card.review {
+        border-color: var(--line-strong);
+        background: #fffdf5;
+      }
+
+      .context-card.review.active,
+      .context-card.review:hover {
+        background: #fff8df;
+      }
+
+      .context-row {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+        min-width: 0;
+      }
+
+      .context-name {
+        min-width: 0;
+        overflow: hidden;
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+        font-size: 13px;
+        font-weight: 650;
+        line-height: 1.18;
+      }
+
+      .context-card .count {
+        flex: 0 0 auto;
+        margin-top: 0;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .context-kind {
+        margin-top: 3px;
+        color: var(--muted);
+        font-size: 11px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .search-field {
+        position: relative;
+      }
+
+      .search-field input {
+        padding-right: 34px;
+      }
+
+      .search-clear {
+        position: absolute;
+        right: 6px;
+        top: 50%;
+        width: 24px;
+        height: 24px;
+        border: 0;
+        border-radius: 50%;
+        padding: 0;
+        transform: translateY(-50%);
+        background: transparent;
+        color: var(--muted);
+        line-height: 1;
+      }
+
+      .search-clear[hidden] {
+        display: none;
+      }
+
+      .sidebar-actions {
+        display: grid;
+        gap: 8px;
+      }
+
+      .sidebar-actions button {
+        background: var(--accent);
+        color: white;
+      }
+
+      .sidebar-actions button.secondary {
+        background: var(--panel);
+        color: var(--ink);
+      }
+
+      .maintenance-menu {
+        display: grid;
+        gap: 8px;
+      }
+
+      .maintenance-menu summary {
+        border: 1px solid var(--line-strong);
+        border-radius: 6px;
+        padding: 8px 11px;
+        background: var(--panel);
+        color: var(--ink);
+        cursor: pointer;
+        font-size: 13px;
+        text-align: center;
+        list-style: none;
+      }
+
+      .maintenance-menu summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .maintenance-actions {
+        display: grid;
+        gap: 8px;
+      }
+
+      .bulk-progress {
+        border: 1px solid #d6c579;
+        border-radius: 8px;
+        background: #fff8df;
+        color: #3d3100;
+        padding: 10px;
+        display: grid;
+        gap: 8px;
+      }
+
+      .bulk-progress[hidden] {
+        display: none;
+      }
+
+      .bulk-progress-row {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 10px;
+      }
+
+      .bulk-progress-title {
+        font-size: 12px;
+        font-weight: 750;
+      }
+
+      .bulk-progress-count {
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+
+      .bulk-progress-bar {
+        height: 6px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: rgba(61, 49, 0, 0.18);
+      }
+
+      .bulk-progress-fill {
+        width: 0%;
+        height: 100%;
+        border-radius: inherit;
+        background: #111111;
+        transition: width 180ms ease;
+      }
+
+      .bulk-progress-note {
+        color: #6a590a;
+        font-size: 11px;
+        line-height: 1.35;
+      }
+
+      .bulk-progress-details {
+        color: #7b690f;
+        font-size: 10px;
+        line-height: 1.35;
+      }
+
+      .bulk-progress-actions {
+        display: flex;
+        gap: 8px;
+      }
+
+      .bulk-progress-actions[hidden] {
+        display: none;
+      }
+
+      .status {
+        margin-top: auto;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .list {
+        border-right: 1px solid var(--line);
+        background: var(--panel);
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+
+      .list-header {
+        padding: 20px 18px 14px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .list-heading-row {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .list-actions {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .list-header h1 {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 650;
+        line-height: 1.1;
+      }
+
+      .count {
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .selection-actions {
+        margin-top: 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel-soft);
+        padding: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .selection-actions[hidden] {
+        display: none;
+      }
+
+      .selection-count {
+        color: var(--ink);
+        font-size: 12px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .selection-buttons {
+        display: flex;
+        justify-content: flex-end;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+
+      .meetings {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        padding: 10px;
+      }
+
+      .meeting-row {
+        display: grid;
+        grid-template-columns: 28px minmax(0, 1fr);
+        align-items: stretch;
+        gap: 4px;
+        border-radius: 8px;
+      }
+
+      .meeting-row + .meeting-row {
+        margin-top: 2px;
+      }
+
+      .meeting-select {
+        align-self: start;
+        width: 16px;
+        height: 16px;
+        margin: 14px 5px 0 3px;
+        padding: 0;
+        accent-color: var(--accent);
+        box-shadow: none;
+      }
+
+      .meeting-card {
+        width: 100%;
+        text-align: left;
+        background: transparent;
+        color: var(--ink);
+        border-radius: 8px;
+        padding: 12px;
+        border: 1px solid transparent;
+      }
+
+      .meeting-card:hover {
+        background: var(--hover);
+      }
+
+      .meeting-card.active {
+        background: var(--panel-soft);
+        border-color: var(--line-strong);
+        box-shadow: none;
+      }
+
+      .meeting-row.selected .meeting-card {
+        background: #f3f3ee;
+        border-color: var(--accent);
+      }
+
+      .meeting-title {
+        font-weight: 800;
+        line-height: 1.25;
+      }
+
+      .meeting-meta,
+      .meeting-snippet {
+        margin-top: 5px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.35;
+      }
+
+      .meeting-snippet {
+        display: -webkit-box;
+        overflow: hidden;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 3;
+      }
+
+      .cleanup-badge {
+        display: inline-flex;
+        max-width: 100%;
+        margin-top: 7px;
+        border: 1px solid #efe0a6;
+        border-radius: 999px;
+        background: #fff8df;
+        color: #5f4b00;
+        padding: 3px 8px;
+        font-size: 11px;
+        font-weight: 650;
+      }
+
+      mark {
+        border-radius: 3px;
+        background: #fff0a8;
+        color: inherit;
+        padding: 0 1px;
+      }
+
+      .detail {
+        min-height: 0;
+        overflow: hidden;
+        background: var(--panel);
+      }
+
+      .detail-inner {
+        height: 100%;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .detail-header {
+        flex: 0 0 auto;
+        border-bottom: 1px solid var(--line);
+        padding: 20px 24px 0;
+      }
+
+      .detail-top {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 18px;
+        margin-bottom: 14px;
+      }
+
+      .detail-title {
+        margin: 0;
+        font-size: 22px;
+        font-weight: 650;
+        line-height: 1.06;
+      }
+
+      .pills {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 10px;
+      }
+
+      .pill {
+        border-radius: 999px;
+        padding: 4px 8px;
+        background: var(--hover);
+        color: var(--ink);
+        font-size: 12px;
+        font-weight: 500;
+      }
+
+      .pill-button {
+        border: 0;
+        cursor: pointer;
+      }
+
+      .pill-button:hover {
+        background: #fff8df;
+      }
+
+      .toolbar {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        max-width: 360px;
+      }
+
+      .copy-group {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 6px;
+        padding: 8px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel-soft);
+      }
+
+      .copy-group-label {
+        flex: 0 0 100%;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 650;
+        text-align: right;
+      }
+
+      .section {
+        border-top: 1px solid var(--line);
+        padding: 18px 0;
+      }
+
+      .section h2 {
+        margin: 0 0 12px;
+        font-size: 13px;
+        color: var(--ink);
+        letter-spacing: 0;
+      }
+
+      .detail-tabs {
+        display: flex;
+        gap: 4px;
+        border-top: 1px solid var(--line);
+        padding-top: 10px;
+      }
+
+      .tab {
+        border: 0;
+        border-radius: 6px 6px 0 0;
+        background: transparent;
+        color: var(--muted);
+        padding: 10px 13px;
+        font-size: 13px;
+        font-weight: 650;
+      }
+
+      .tab:hover {
+        background: var(--hover);
+        color: var(--ink);
+      }
+
+      .tab.active {
+        background: var(--panel);
+        color: var(--ink);
+        box-shadow: inset 0 -2px 0 var(--accent);
+      }
+
+      .detail-body {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow: hidden;
+        padding: 18px 24px 24px;
+      }
+
+      .reader-panel {
+        height: 100%;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .reader-heading {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 10px;
+      }
+
+      .reader-heading h2 {
+        margin: 0;
+        font-size: 14px;
+      }
+
+      .reader-hint {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .details-panel {
+        height: 100%;
+        min-height: 0;
+        overflow: auto;
+        padding-right: 6px;
+      }
+
+      .metadata-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+
+      .field.full {
+        grid-column: 1 / -1;
+      }
+
+      .speaker-grid {
+        display: grid;
+        gap: 10px;
+      }
+
+      .speaker-row {
+        display: grid;
+        grid-template-columns: minmax(120px, 180px) 1fr;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .speaker-key {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--muted);
+        font-family: var(--font-mono);
+        font-size: 12px;
+      }
+
+      .markdown {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel-soft);
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow: auto;
+        padding: 14px;
+        color: var(--ink);
+        font-family: var(--font-mono);
+        font-size: 12px;
+        line-height: 1.55;
+      }
+
+      .transcript-markdown {
+        display: grid;
+        gap: 0;
+        font-family: var(--font-sans);
+        font-size: 13px;
+        line-height: 1.52;
+      }
+
+      .transcript-turn {
+        padding: 10px 0;
+        border-top: 1px solid var(--line);
+      }
+
+      .transcript-turn:first-child {
+        border-top: 0;
+        padding-top: 0;
+      }
+
+      .transcript-meta {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        margin-bottom: 5px;
+        min-width: 0;
+      }
+
+      .transcript-speaker {
+        display: inline-flex;
+        overflow: hidden;
+        max-width: 180px;
+        border-radius: 999px;
+        background: var(--hover);
+        color: var(--ink);
+        padding: 2px 7px;
+        font-size: 12px;
+        font-weight: 650;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .transcript-time {
+        color: var(--muted);
+        font-family: var(--font-mono);
+        font-size: 10px;
+      }
+
+      .transcript-text {
+        min-width: 0;
+        color: var(--ink);
+        overflow-wrap: anywhere;
+      }
+
+      .transcript-paragraph {
+        margin: 0 0 10px;
+      }
+
+      .transcript-section {
+        margin: 14px 0 8px;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 650;
+      }
+
+      .transcript-empty {
+        color: var(--muted);
+      }
+
+      .summary-markdown {
+        font-family: var(--font-sans);
+        font-size: 14px;
+        line-height: 1.58;
+      }
+
+      .summary-markdown h3 {
+        margin: 18px 0 8px;
+        font-size: 13px;
+        line-height: 1.25;
+      }
+
+      .summary-markdown h3:first-child {
+        margin-top: 0;
+      }
+
+      .summary-markdown p {
+        margin: 0 0 12px;
+      }
+
+      .summary-markdown ul {
+        margin: 0 0 14px 18px;
+        padding: 0;
+      }
+
+      .summary-markdown li {
+        margin: 5px 0;
+      }
+
+      .empty {
+        color: var(--muted);
+        padding: 28px;
+      }
+
+      .toast {
+        position: fixed;
+        right: 18px;
+        bottom: 18px;
+        z-index: 10;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        max-width: 420px;
+        border: 1px solid var(--line-strong);
+        border-radius: 8px;
+        background: var(--ink);
+        color: white;
+        box-shadow: var(--shadow);
+        padding: 10px 12px;
+        font-size: 13px;
+        opacity: 0;
+        transform: translateY(6px);
+        transition:
+          opacity 140ms ease,
+          transform 140ms ease;
+      }
+
+      .toast.show {
+        opacity: 1;
+        transform: translateY(0);
+      }
+
+      .toast button {
+        border-color: rgba(255, 255, 255, 0.35);
+        background: rgba(255, 255, 255, 0.1);
+        color: white;
+        white-space: nowrap;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div>
+            <div class="brand-title">Poha</div>
+            <div class="count">Recording browser</div>
+          </div>
+          <div class="mark" aria-hidden="true"></div>
+        </div>
+
+        <div class="archive-stats" aria-label="Archive totals">
+          <div class="archive-stat">
+            <div id="total-recordings" class="archive-stat-value">0</div>
+            <div class="archive-stat-label">recordings</div>
+          </div>
+          <div class="archive-stat">
+            <div id="total-transcripts" class="archive-stat-value">0</div>
+            <div class="archive-stat-label">transcripts</div>
+          </div>
+        </div>
+
+        <div>
+          <label for="query">Search</label>
+          <div class="search-field">
+            <input id="query" placeholder="Search recordings" />
+            <button id="query-clear" class="search-clear" type="button" aria-label="Clear search" hidden>×</button>
+          </div>
+        </div>
+
+        <div class="context-shell">
+          <label>Companies</label>
+          <div id="contexts" class="context-list"></div>
+        </div>
+
+        <div class="sidebar-actions">
+          <details id="maintenance-menu" class="maintenance-menu">
+            <summary>More</summary>
+            <div class="maintenance-actions">
+              <button id="rebuild" class="secondary" type="button">Re-scan files</button>
+              <button id="bulk-summarize" class="secondary" type="button">
+                Summarize queued
+              </button>
+              <button id="export-all" class="secondary" type="button">Export all</button>
+            </div>
+          </details>
+        </div>
+
+        <div id="bulk-progress" class="bulk-progress" hidden>
+          <div class="bulk-progress-row">
+            <div id="bulk-progress-title" class="bulk-progress-title">Codex cleanup</div>
+            <div id="bulk-progress-count" class="bulk-progress-count">0 queued</div>
+          </div>
+          <div class="bulk-progress-bar" aria-hidden="true">
+            <div id="bulk-progress-fill" class="bulk-progress-fill"></div>
+          </div>
+          <div id="bulk-progress-note" class="bulk-progress-note">Preparing queue.</div>
+          <div id="bulk-progress-details" class="bulk-progress-details"></div>
+          <div id="bulk-progress-actions" class="bulk-progress-actions" hidden>
+            <button id="bulk-cancel" class="secondary compact" type="button">Cancel Codex</button>
+          </div>
+        </div>
+
+        <div id="status" class="status">Loading recordings.</div>
+      </aside>
+
+      <section class="list">
+        <div class="list-header">
+          <div class="list-heading-row">
+            <div>
+              <h1>Recordings</h1>
+              <div id="meeting-count" class="count">0 recordings</div>
+            </div>
+            <div class="list-actions">
+              <button id="select-visible" class="secondary compact" type="button">
+                Select visible
+              </button>
+              <button id="refresh" class="secondary compact" type="button">Refresh</button>
+            </div>
+          </div>
+          <div id="selection-actions" class="selection-actions" hidden>
+            <div id="selection-count" class="selection-count">0 selected</div>
+            <div class="selection-buttons">
+              <button id="selection-clear" class="secondary compact" type="button">
+                Clear
+              </button>
+              <button id="selection-delete" class="danger compact" type="button">
+                Move out
+              </button>
+            </div>
+          </div>
+        </div>
+        <div id="meetings" class="meetings"></div>
+      </section>
+
+      <section class="detail">
+        <div id="detail" class="detail-inner empty">Select a recording.</div>
+      </section>
+    </main>
+    <div id="toast" class="toast" hidden></div>
+
+    <script>
+      const tauriInvoke = window.__TAURI__?.core?.invoke;
+      const state = {
+        contexts: [],
+        meetings: [],
+        archiveStats: {
+          recordings: 0,
+          transcripts: 0,
+        },
+        reviewBreakdown: {
+          total: 0,
+          summary: 0,
+          stale: 0,
+          title: 0,
+          speakers: 0,
+        },
+        detail: null,
+        selectedId: null,
+        selectedMeetingIds: new Set(),
+        selectedContext: "",
+        activeDetailTab: null,
+        lastQuery: "",
+        pendingDeleteId: null,
+        pendingDeleteTimer: null,
+        pendingBatchDeleteKey: null,
+        pendingBatchDeleteTimer: null,
+        batchDeleting: false,
+        bulkRunning: false,
+        bulkMonitorTimer: null,
+        bulkProgress: {
+          total: 0,
+          pending: null,
+          startedAt: null,
+          note: "",
+          details: "",
+          cancellable: false,
+        },
+        toastTimer: null,
+      };
+
+      const el = {
+        query: document.getElementById("query"),
+        queryClear: document.getElementById("query-clear"),
+        contexts: document.getElementById("contexts"),
+        selectVisible: document.getElementById("select-visible"),
+        selectionActions: document.getElementById("selection-actions"),
+        selectionCount: document.getElementById("selection-count"),
+        selectionClear: document.getElementById("selection-clear"),
+        selectionDelete: document.getElementById("selection-delete"),
+        refresh: document.getElementById("refresh"),
+        rebuild: document.getElementById("rebuild"),
+        bulkSummarize: document.getElementById("bulk-summarize"),
+        exportAll: document.getElementById("export-all"),
+        maintenanceMenu: document.getElementById("maintenance-menu"),
+        bulkProgress: document.getElementById("bulk-progress"),
+        bulkProgressTitle: document.getElementById("bulk-progress-title"),
+        bulkProgressCount: document.getElementById("bulk-progress-count"),
+        bulkProgressFill: document.getElementById("bulk-progress-fill"),
+        bulkProgressNote: document.getElementById("bulk-progress-note"),
+        bulkProgressDetails: document.getElementById("bulk-progress-details"),
+        bulkProgressActions: document.getElementById("bulk-progress-actions"),
+        bulkCancel: document.getElementById("bulk-cancel"),
+        status: document.getElementById("status"),
+        totalRecordings: document.getElementById("total-recordings"),
+        totalTranscripts: document.getElementById("total-transcripts"),
+        count: document.getElementById("meeting-count"),
+        meetings: document.getElementById("meetings"),
+        detail: document.getElementById("detail"),
+        toast: document.getElementById("toast"),
+      };
+
+      const setStatus = (message, options = {}) => {
+        if (
+          state.bulkRunning &&
+          !options.force &&
+          ["Ready.", "Refreshing recordings.", "Loading recording."].includes(message)
+        ) {
+          return;
+        }
+        el.status.textContent = message;
+      };
+
+      const syncBulkButton = () => {
+        el.bulkSummarize.disabled = state.bulkRunning;
+        el.bulkSummarize.textContent = state.bulkRunning
+          ? "Codex running"
+          : "Summarize queued";
+      };
+
+      const selectedIds = () => Array.from(state.selectedMeetingIds);
+
+      const visibleMeetingIds = () => state.meetings.map((meeting) => meeting.id);
+
+      const selectionKey = () => selectedIds().sort().join("|");
+
+      function clearPendingBatchDelete() {
+        clearTimeout(state.pendingBatchDeleteTimer);
+        state.pendingBatchDeleteTimer = null;
+        state.pendingBatchDeleteKey = null;
+      }
+
+      function syncSelectionActions() {
+        const count = state.selectedMeetingIds.size;
+        const visibleIds = visibleMeetingIds();
+        const allVisibleSelected =
+          visibleIds.length > 0 &&
+          visibleIds.every((id) => state.selectedMeetingIds.has(id));
+        const pending = count > 0 && state.pendingBatchDeleteKey === selectionKey();
+
+        el.selectionActions.hidden = count === 0;
+        el.selectionCount.textContent = `${formatNumber(count)} selected`;
+        el.selectVisible.disabled = !visibleIds.length || state.batchDeleting;
+        el.selectVisible.textContent = allVisibleSelected
+          ? "Clear visible"
+          : "Select visible";
+        el.selectionClear.disabled = count === 0 || state.batchDeleting;
+        el.selectionDelete.disabled = count === 0 || state.batchDeleting;
+        el.selectionDelete.textContent = state.batchDeleting
+          ? "Moving..."
+          : pending
+            ? `Confirm move ${formatNumber(count)}`
+            : "Move out";
+      }
+
+      function pruneSelectionToVisible() {
+        const visible = new Set(visibleMeetingIds());
+        let changed = false;
+        for (const id of selectedIds()) {
+          if (!visible.has(id)) {
+            state.selectedMeetingIds.delete(id);
+            changed = true;
+          }
+        }
+        if (changed) clearPendingBatchDelete();
+      }
+
+      function toggleMeetingSelection(id, checked) {
+        if (checked) {
+          state.selectedMeetingIds.add(id);
+        } else {
+          state.selectedMeetingIds.delete(id);
+        }
+        clearPendingBatchDelete();
+        renderMeetings();
+      }
+
+      function toggleVisibleSelection() {
+        const visibleIds = visibleMeetingIds();
+        if (!visibleIds.length || state.batchDeleting) return;
+        const allVisibleSelected = visibleIds.every((id) =>
+          state.selectedMeetingIds.has(id),
+        );
+        for (const id of visibleIds) {
+          if (allVisibleSelected) {
+            state.selectedMeetingIds.delete(id);
+          } else {
+            state.selectedMeetingIds.add(id);
+          }
+        }
+        clearPendingBatchDelete();
+        renderMeetings();
+      }
+
+      function clearSelection() {
+        state.selectedMeetingIds.clear();
+        clearPendingBatchDelete();
+        renderMeetings();
+      }
+
+      const formatElapsed = (startedAt) => {
+        if (!startedAt) return "0s";
+        const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+        const minutes = Math.floor(seconds / 60);
+        const rest = seconds % 60;
+        return minutes ? `${minutes}m ${String(rest).padStart(2, "0")}s` : `${rest}s`;
+      };
+
+      const renderBulkProgress = () => {
+        const progress = state.bulkProgress;
+        if (!state.bulkRunning && !progress.note) {
+          el.bulkProgress.hidden = true;
+          return;
+        }
+
+        const total = Number(progress.total || 0);
+        const pending =
+          typeof progress.pending === "number" ? progress.pending : total;
+        const completed = Math.max(0, total - pending);
+        const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
+        el.bulkProgress.hidden = false;
+        el.bulkProgressTitle.textContent = state.bulkRunning
+          ? "Codex summarizing"
+          : "Codex cleanup";
+        el.bulkProgressCount.textContent = total
+          ? `${completed}/${total}`
+          : state.bulkRunning
+            ? "Checking"
+            : "Idle";
+        el.bulkProgressFill.style.width = `${Math.max(0, Math.min(100, percent))}%`;
+        el.bulkProgressNote.textContent =
+          progress.note ||
+          (state.bulkRunning
+            ? `Still running. ${pending} queued. ${formatElapsed(progress.startedAt)} elapsed.`
+            : "Queue idle.");
+        el.bulkProgressDetails.textContent = progress.details || "";
+        el.bulkProgressActions.hidden = !state.bulkRunning || !progress.cancellable;
+      };
+
+      const setBulkProgress = (patch) => {
+        state.bulkProgress = {
+          ...state.bulkProgress,
+          ...patch,
+        };
+        renderBulkProgress();
+      };
+
+      const getBulkQueueStatus = (options = {}) =>
+        invoke("get_codex_bulk_enrichment_status", {
+          request: {
+            operation: "missingSummaries",
+            refresh: Boolean(options.refresh),
+          },
+        });
+
+      const stopBulkMonitor = () => {
+        clearInterval(state.bulkMonitorTimer);
+        state.bulkMonitorTimer = null;
+      };
+
+      const startBulkMonitor = () => {
+        stopBulkMonitor();
+        const poll = async () => {
+          if (!state.bulkRunning) return;
+          try {
+            const status = await getBulkQueueStatus();
+            const total = Math.max(
+              state.bulkProgress.total || 0,
+              status.pendingCount || 0,
+            );
+            const pending = status.pendingCount || 0;
+            const current = status.sampleItems?.[0];
+            setBulkProgress({
+              total,
+              pending,
+              note: total
+                ? `${pending} queued. ${formatElapsed(state.bulkProgress.startedAt)} elapsed.`
+                : `Checking queue. ${formatElapsed(state.bulkProgress.startedAt)} elapsed.`,
+              details: current
+                ? `Current queue: ${current.title} (${current.reason}).`
+                : status.activePid
+                  ? "Codex is running; waiting for the index to refresh."
+                  : "",
+              cancellable: Boolean(status.activePid),
+            });
+            if (total) {
+              setStatus(
+                `Codex summarizing queued recordings (${total - pending}/${total}).`,
+                { force: true },
+              );
+            }
+          } catch (error) {
+            setBulkProgress({
+              note: `Still running. Queue check failed: ${error.message}`,
+            });
+          }
+        };
+        poll();
+        state.bulkMonitorTimer = setInterval(poll, 5000);
+      };
+
+      async function refreshBulkQueueBadge(options = {}) {
+        if (state.bulkRunning) return;
+        const status = await getBulkQueueStatus({ refresh: Boolean(options.refresh) });
+        setBulkProgress({
+          total: status.pendingCount,
+          pending: status.pendingCount,
+          note: status.pendingCount
+            ? `${status.pendingCount} summary ${
+                status.pendingCount === 1 ? "item" : "items"
+              } queued.`
+            : "No summary work queued.",
+          details: queuedItemsDetail(status.sampleItems),
+          cancellable: false,
+        });
+      }
+
+      const hideToast = () => {
+        clearTimeout(state.toastTimer);
+        el.toast.classList.remove("show");
+        state.toastTimer = setTimeout(() => {
+          el.toast.hidden = true;
+          el.toast.innerHTML = "";
+        }, 160);
+      };
+
+      const showToast = (message, action) => {
+        clearTimeout(state.toastTimer);
+        el.toast.hidden = false;
+        el.toast.innerHTML = `
+          <span>${escapeHtml(message)}</span>
+          ${action?.label ? `<button type="button">${escapeHtml(action.label)}</button>` : ""}
+        `;
+        requestAnimationFrame(() => el.toast.classList.add("show"));
+        const actionButton = el.toast.querySelector("button");
+        actionButton?.addEventListener("click", async () => {
+          try {
+            await action.handler?.();
+            hideToast();
+          } catch (error) {
+            setStatus(error.message);
+            showToast(error.message);
+          }
+        });
+        state.toastTimer = setTimeout(hideToast, action?.duration ?? 4200);
+      };
+
+      const invoke = async (command, args = {}) => {
+        if (!tauriInvoke) {
+          throw new Error("Poha app bridge unavailable.");
+        }
+        return tauriInvoke(command, args);
+      };
+
+      const debounce = (fn, delay) => {
+        let timer;
+        return (...args) => {
+          clearTimeout(timer);
+          timer = setTimeout(() => fn(...args), delay);
+        };
+      };
+
+      const formatDate = (value) => {
+        if (!value) return "No date";
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return value;
+        return date.toLocaleString([], {
+          month: "short",
+          day: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+        });
+      };
+
+      const escapeHtml = (value) =>
+        String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;");
+
+      const highlightText = (value, query = state.lastQuery) => {
+        const text = String(value ?? "");
+        const needle = String(query ?? "").trim().toLowerCase();
+        if (!needle) return escapeHtml(text);
+        const start = text.toLowerCase().indexOf(needle);
+        if (start < 0) return escapeHtml(text);
+        const end = start + needle.length;
+        return `${escapeHtml(text.slice(0, start))}<mark>${escapeHtml(
+          text.slice(start, end),
+        )}</mark>${escapeHtml(text.slice(end))}`;
+      };
+
+      const cleanSummaryMarkdown = (value) => {
+        const text = String(value ?? "").trim();
+        if (!text) return "";
+        return text
+          .replace(/^\s*#\s*summary\s*/i, "")
+          .replace(/\[\^https?:\/\/[^\]]+\]/g, "")
+          .replace(/https?:\/\/\S+/g, "")
+          .trim();
+      };
+
+      const cleanSnippet = (value) => {
+        const text = String(value ?? "")
+          .replace(/\[\^https?:\/\/[^\]]+\]/g, " ")
+          .replace(/\[\^[^\]]*/g, " ")
+          .replace(/https?:\/\/\S+/g, " ")
+          .replace(/\[[ x]\]\s*/gi, "")
+          .replace(/(^|\s)[-*•]\s+/g, "$1")
+          .replace(/#+\s*/g, "")
+          .replace(/\s+/g, " ")
+          .trim();
+        return text || "No summary yet.";
+      };
+
+      const renderSummaryMarkdown = (value, fallback) => {
+        const text = cleanSummaryMarkdown(value);
+        if (!text) return `<p>${escapeHtml(fallback)}</p>`;
+
+        const lines = text.split(/\r?\n/);
+        const out = [];
+        let paragraph = [];
+        let list = [];
+
+        const flushParagraph = () => {
+          if (!paragraph.length) return;
+          out.push(`<p>${escapeHtml(paragraph.join(" "))}</p>`);
+          paragraph = [];
+        };
+        const flushList = () => {
+          if (!list.length) return;
+          out.push(`<ul>${list.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`);
+          list = [];
+        };
+
+        for (const rawLine of lines) {
+          const line = rawLine.trim();
+          if (!line) {
+            flushParagraph();
+            flushList();
+            continue;
+          }
+          const heading = line.match(/^#{1,3}\s+(.+)$/);
+          if (heading) {
+            flushParagraph();
+            flushList();
+            out.push(`<h3>${escapeHtml(heading[1])}</h3>`);
+            continue;
+          }
+          const bullet = line.match(/^(?:[-*•]|\d+\.)\s+(.+)$/);
+          if (bullet) {
+            flushParagraph();
+            list.push(bullet[1]);
+            continue;
+          }
+          flushList();
+          paragraph.push(line);
+        }
+
+        flushParagraph();
+        flushList();
+        return out.join("") || `<p>${escapeHtml(fallback)}</p>`;
+      };
+
+      const cleanTranscriptMarkdown = (value) => {
+        const text = String(value ?? "").trim();
+        if (!text) return "";
+        return text.replace(/^\s*#\s*transcript\s*/i, "").trim();
+      };
+
+      const parseTranscriptLine = (line) => {
+        const normalized = line.replace(/^[-*•]\s+/, "").trim();
+        const timestamped = normalized.match(/^\[([0-9:.]+)\]\s+([^:]{1,80}):\s*(.*)$/);
+        if (timestamped) {
+          return {
+            time: timestamped[1],
+            speaker: timestamped[2].trim(),
+            text: timestamped[3].trim(),
+          };
+        }
+
+        const boldSpeaker = normalized.match(/^\*\*([^*]{1,80}):\*\*\s*(.*)$/);
+        if (boldSpeaker) {
+          return {
+            time: "",
+            speaker: boldSpeaker[1].trim(),
+            text: boldSpeaker[2].trim(),
+          };
+        }
+
+        const plainSpeaker = normalized.match(/^([A-Z][A-Za-z0-9 _.-]{0,40}|Me|Speaker \d+):\s+(.+)$/);
+        if (plainSpeaker) {
+          return {
+            time: "",
+            speaker: plainSpeaker[1].trim(),
+            text: plainSpeaker[2].trim(),
+          };
+        }
+
+        return null;
+      };
+
+      const transcriptText = (value) =>
+        escapeHtml(value.replace(/\s+/g, " ").trim());
+
+      const renderTranscriptTurn = (turn) => `
+        <div class="transcript-turn">
+          <div class="transcript-meta">
+            <div class="transcript-speaker">${escapeHtml(turn.speaker || "Speaker")}</div>
+            ${turn.time ? `<div class="transcript-time">${escapeHtml(turn.time)}</div>` : ""}
+          </div>
+          <div class="transcript-text">${transcriptText(turn.text)}</div>
+        </div>
+      `;
+
+      const renderTranscriptMarkdown = (value, fallback) => {
+        const text = cleanTranscriptMarkdown(value);
+        if (!text) return `<div class="transcript-empty">${escapeHtml(fallback)}</div>`;
+
+        const blocks = [];
+        let currentTurn = null;
+        let paragraph = [];
+
+        const flushTurn = () => {
+          if (!currentTurn) return;
+          blocks.push(renderTranscriptTurn(currentTurn));
+          currentTurn = null;
+        };
+        const flushParagraph = () => {
+          if (!paragraph.length) return;
+          flushTurn();
+          blocks.push(
+            `<p class="transcript-paragraph">${escapeHtml(paragraph.join(" "))}</p>`,
+          );
+          paragraph = [];
+        };
+
+        for (const rawLine of text.split(/\r?\n/)) {
+          const line = rawLine.trim();
+          if (!line) {
+            flushParagraph();
+            flushTurn();
+            continue;
+          }
+
+          const heading = line.match(/^#{1,3}\s+(.+)$/);
+          if (heading) {
+            flushParagraph();
+            flushTurn();
+            blocks.push(`<div class="transcript-section">${escapeHtml(heading[1])}</div>`);
+            continue;
+          }
+
+          const turn = parseTranscriptLine(line);
+          if (turn) {
+            flushParagraph();
+            flushTurn();
+            currentTurn = turn;
+            continue;
+          }
+
+          if (currentTurn) {
+            currentTurn.text = `${currentTurn.text} ${line}`.trim();
+          } else {
+            paragraph.push(line);
+          }
+        }
+
+        flushParagraph();
+        flushTurn();
+        return blocks.join("") || `<div class="transcript-empty">${escapeHtml(fallback)}</div>`;
+      };
+
+      const truncateMiddle = (value, maxLength = 22) => {
+        const text = String(value ?? "").trim();
+        if (text.length <= maxLength) return text;
+        return `${text.slice(0, maxLength - 1)}…`;
+      };
+
+      const formatNumber = (value) => Number(value ?? 0).toLocaleString();
+
+      const cleanupBreakdown = (meetings) => {
+        const breakdown = {
+          total: meetings.length,
+          summary: 0,
+          stale: 0,
+          title: 0,
+          speakers: 0,
+        };
+        for (const meeting of meetings) {
+          const enrichment = meeting.enrichment ?? {};
+          if (enrichment.needsSummary) breakdown.summary += 1;
+          if (enrichment.summaryStale) breakdown.stale += 1;
+          if (enrichment.needsTitle) breakdown.title += 1;
+          if (enrichment.needsSpeakers) breakdown.speakers += 1;
+        }
+        return breakdown;
+      };
+
+      const reviewBreakdownLabel = () => {
+        const parts = [
+          state.reviewBreakdown.summary
+            ? `${state.reviewBreakdown.summary} summary`
+            : "",
+          state.reviewBreakdown.stale ? `${state.reviewBreakdown.stale} stale` : "",
+          state.reviewBreakdown.speakers
+            ? `${state.reviewBreakdown.speakers} speakers`
+            : "",
+          state.reviewBreakdown.title ? `${state.reviewBreakdown.title} titles` : "",
+        ].filter(Boolean);
+        return parts.length ? parts.join(" · ") : "No cleanup pending";
+      };
+
+      const syncSearchClear = () => {
+        el.queryClear.hidden = !el.query.value.trim();
+      };
+
+      const queuedItemsDetail = (items = []) =>
+        items.length
+          ? `Next: ${items[0].title} (${items[0].reason}).`
+          : "";
+
+      const errorMessage = (error) =>
+        error?.message ?? String(error ?? "Unknown error.");
+
+      const codexFailureDetail = (summary) => {
+        if (summary?.failureMessage) {
+          return summary.failureMessage.slice(0, 320);
+        }
+        const lines = `${summary?.stderrTail ?? ""}\n${summary?.stdoutTail ?? ""}`
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean);
+        const errorLine =
+          lines.find((line) => line.toLowerCase().startsWith("error:")) ??
+          lines.at(-1);
+        return errorLine ? errorLine.slice(0, 220) : "";
+      };
+
+      const speakerValue = (speakerMap, candidate) =>
+        speakerMap[candidate] ?? (candidate === "Me" ? "Adi" : "");
+
+      const enrichmentLabel = (enrichment) => {
+        if (!enrichment?.needsEnrichment) return "Ready";
+        const labels = {
+          missing_summary: "summary",
+          stale_summary: "summary",
+          generic_title: "title",
+          unmapped_speakers: "speakers",
+          missing_context: "company",
+        };
+        const parts = (enrichment.reasons ?? [])
+          .map((reason) => labels[reason] ?? reason.replaceAll("_", " "))
+          .filter(Boolean);
+        return parts.length ? `Needs ${parts.join(", ")}` : "Needs enrichment";
+      };
+
+      const defaultDetailTab = (detail) =>
+        detail?.summaryMarkdown ? "summary" : "transcript";
+
+      async function loadMeetings(preferredId = state.selectedId) {
+        setStatus("Refreshing recordings.");
+        state.lastQuery = el.query.value.trim();
+        syncSearchClear();
+        await loadArchiveStats();
+        await loadContexts();
+        const meetings = await invoke("list_meetings", {
+          query: state.lastQuery,
+          context: state.selectedContext,
+          limit: 200,
+        });
+        state.meetings = meetings;
+        pruneSelectionToVisible();
+        renderMeetings();
+        setStatus("Ready.");
+
+        const next =
+          meetings.find((meeting) => meeting.id === preferredId) ?? meetings[0];
+        if (next) {
+          await selectMeeting(next.id);
+        } else {
+          state.selectedId = null;
+          state.detail = null;
+          renderDetail();
+        }
+        await refreshBulkQueueBadge({ refresh: true });
+      }
+
+      async function loadArchiveStats() {
+        const meetings = await invoke("list_meetings", {
+          limit: 10000,
+        });
+        state.archiveStats = {
+          recordings: meetings.length,
+          transcripts: meetings.filter((meeting) => meeting.hasTranscript).length,
+        };
+        renderArchiveStats();
+      }
+
+      function renderArchiveStats() {
+        el.totalRecordings.textContent = formatNumber(state.archiveStats.recordings);
+        el.totalTranscripts.textContent = formatNumber(state.archiveStats.transcripts);
+      }
+
+      async function loadContexts() {
+        state.contexts = await invoke("list_meeting_contexts", {
+          query: state.lastQuery,
+        });
+        await loadReviewBreakdown();
+        if (
+          state.selectedContext &&
+          !state.contexts.some((context) => context.name === state.selectedContext)
+        ) {
+          state.selectedContext = "";
+        }
+        renderContexts();
+      }
+
+      async function loadReviewBreakdown() {
+        const meetings = await invoke("list_meetings", {
+          context: "Review Needed",
+          limit: 500,
+        });
+        state.reviewBreakdown = cleanupBreakdown(meetings);
+      }
+
+      function renderContexts() {
+        el.contexts.innerHTML = "";
+        const total = state.contexts
+          .filter((context) => context.kind !== "Review")
+          .reduce(
+          (sum, context) => sum + context.meetingCount,
+          0,
+        );
+        const all = document.createElement("button");
+        all.type = "button";
+        all.className = `context-card${state.selectedContext ? "" : " active"}`;
+        all.innerHTML = `
+          <div class="context-row">
+            <div class="context-name">All conversations</div>
+            <div class="count">${total}</div>
+          </div>
+          <div class="context-kind">Everything indexed</div>
+        `;
+        all.addEventListener("click", () => selectContext(""));
+        el.contexts.appendChild(all);
+
+        const reviewContexts = state.contexts.filter((context) => context.kind === "Review");
+        const companyContexts = state.contexts.filter((context) => context.kind !== "Review");
+
+        for (const context of [...reviewContexts, ...companyContexts]) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = `context-card${context.kind === "Review" ? " review" : ""}${
+            context.name === state.selectedContext ? " active" : ""
+          }`;
+          button.innerHTML = `
+            <div class="context-row">
+              <div class="context-name">${escapeHtml(context.name)}</div>
+              <div class="count">${context.meetingCount}</div>
+            </div>
+            <div class="context-kind">${escapeHtml(
+              context.kind === "Review" ? reviewBreakdownLabel() : context.kind,
+            )}</div>
+          `;
+          button.addEventListener("click", () => selectContext(context.name));
+          el.contexts.appendChild(button);
+        }
+      }
+
+      function selectContext(name) {
+        state.selectedContext = name;
+        state.selectedId = null;
+        renderContexts();
+        loadMeetings(null).catch((error) => setStatus(error.message));
+      }
+
+      function renderMeetings() {
+        document.querySelector(".list-header h1").textContent =
+          state.selectedContext || "All conversations";
+        const archiveSuffix = state.archiveStats.recordings
+          ? ` · ${formatNumber(state.archiveStats.recordings)} archive total`
+          : "";
+        const selectedContext = state.contexts.find(
+          (context) => context.name === state.selectedContext,
+        );
+        const scopeTotal = state.selectedContext
+          ? selectedContext?.meetingCount
+          : state.archiveStats.recordings;
+        if (state.lastQuery) {
+          const scope = state.selectedContext || "all conversations";
+          el.count.textContent = `${state.meetings.length} of ${formatNumber(
+            scopeTotal ?? state.meetings.length,
+          )} ${scope.toLowerCase()} matching "${state.lastQuery}"${archiveSuffix}`;
+        } else if (state.selectedContext === "Review Needed") {
+          el.count.textContent = `${formatNumber(
+            state.meetings.length,
+          )} cleanup recordings · ${reviewBreakdownLabel()}${archiveSuffix}`;
+        } else {
+          el.count.textContent = `${formatNumber(state.meetings.length)} recording${
+            state.meetings.length === 1 ? "" : "s"
+          }${state.selectedContext ? archiveSuffix : ""}`;
+        }
+        el.meetings.innerHTML = "";
+        if (!state.meetings.length) {
+          el.meetings.innerHTML = `<div class="empty">${
+            state.lastQuery
+              ? `No recordings found for "${escapeHtml(state.lastQuery)}".`
+              : "No recordings found."
+          }</div>`;
+          syncSelectionActions();
+          return;
+        }
+
+        for (const meeting of state.meetings) {
+          const row = document.createElement("div");
+          const isSelected = state.selectedMeetingIds.has(meeting.id);
+          row.className = `meeting-row${isSelected ? " selected" : ""}`;
+
+          const checkbox = document.createElement("input");
+          checkbox.className = "meeting-select";
+          checkbox.type = "checkbox";
+          checkbox.checked = isSelected;
+          checkbox.setAttribute("aria-label", `Select ${meeting.title}`);
+          checkbox.addEventListener("click", (event) => event.stopPropagation());
+          checkbox.addEventListener("change", (event) =>
+            toggleMeetingSelection(meeting.id, event.currentTarget.checked),
+          );
+
+          const button = document.createElement("button");
+          button.className = `meeting-card${
+            meeting.id === state.selectedId ? " active" : ""
+          }`;
+          button.type = "button";
+          const meetingMeta = `${formatDate(meeting.startedAt)}${
+            meeting.company ? ` / ${meeting.company}` : ""
+          }`;
+          const meetingSnippet = cleanSnippet(meeting.snippet || meeting.status);
+          button.setAttribute(
+            "aria-label",
+            `${meeting.title}. ${meetingMeta}. ${enrichmentLabel(meeting.enrichment)}.`,
+          );
+          button.innerHTML = `
+            <div class="meeting-title">${highlightText(meeting.title)}</div>
+            <div class="meeting-meta">${highlightText(meetingMeta)}</div>
+            ${
+              meeting.enrichment?.needsEnrichment
+                ? `<div class="cleanup-badge" data-cleanup-shortcut="true">Open cleanup: ${escapeHtml(
+                    enrichmentLabel(meeting.enrichment),
+                  )}</div>`
+                : ""
+            }
+            <div class="meeting-snippet">${highlightText(meetingSnippet)}</div>
+          `;
+          button.addEventListener("click", (event) =>
+            selectMeeting(
+              meeting.id,
+              event.target.closest("[data-cleanup-shortcut]") ? "details" : null,
+            ),
+          );
+          row.append(checkbox, button);
+          el.meetings.appendChild(row);
+        }
+        syncSelectionActions();
+      }
+
+      async function selectMeeting(id, preferredTab = null) {
+        const previousId = state.selectedId;
+        state.selectedId = id;
+        renderMeetings();
+        setStatus("Loading recording.");
+        state.detail = await invoke("get_meeting", { id });
+        if (preferredTab) {
+          state.activeDetailTab = preferredTab;
+        } else if (previousId !== id || !state.activeDetailTab) {
+          state.activeDetailTab = defaultDetailTab(state.detail);
+        }
+        renderDetail();
+        setStatus("Ready.");
+      }
+
+      function renderDetail() {
+        const detail = state.detail;
+        if (!detail) {
+          el.detail.className = "detail-inner empty";
+          el.detail.textContent = "Select a recording.";
+          return;
+        }
+
+        el.detail.className = "detail-inner";
+        const item = detail.item;
+        const metadata = detail.metadata;
+        const company = metadata.company ?? item.company ?? "Individual Networking";
+        const title = metadata.title ?? item.title;
+        const speakerMap = metadata.speakerMap ?? {};
+        const candidates = detail.speakerCandidates ?? [];
+        const copyCompanyLabel =
+          company === "Individual Networking"
+            ? "All networking"
+            : `All ${truncateMiddle(company, 18)}`;
+        const companyOptions = (state.contexts ?? [])
+          .filter((context) => context.kind !== "Review")
+          .map((context) => context.name)
+          .filter((name) => name && name !== company);
+        const activeTab = ["summary", "transcript", "details"].includes(
+            state.activeDetailTab,
+          )
+          ? state.activeDetailTab
+          : defaultDetailTab(detail);
+        state.activeDetailTab = activeTab;
+
+        const tabButton = (tab, label) => `
+          <button type="button" class="tab${activeTab === tab ? " active" : ""}" data-detail-tab="${tab}">
+            ${label}
+          </button>
+        `;
+        const enrichmentPill = item.enrichment?.needsEnrichment
+          ? `<button class="pill pill-button" type="button" data-detail-tab="details">${escapeHtml(
+              enrichmentLabel(item.enrichment),
+            )}</button>`
+          : `<span class="pill">${escapeHtml(enrichmentLabel(item.enrichment))}</span>`;
+
+        const summaryHtml = `
+          <div class="reader-panel">
+            <div class="reader-heading">
+              <h2>Summary</h2>
+              <div class="reader-hint">Recording takeaways above the fold</div>
+            </div>
+            <div class="markdown summary-markdown">${renderSummaryMarkdown(
+              detail.summaryMarkdown,
+              "No summary.md yet.",
+            )}</div>
+          </div>
+        `;
+
+        const transcriptHtml = `
+          <div class="reader-panel">
+            <div class="reader-heading">
+              <h2>Transcript</h2>
+              <div class="reader-hint">Full searchable transcript</div>
+            </div>
+            <div class="markdown transcript-markdown">${renderTranscriptMarkdown(
+              detail.transcriptMarkdown,
+              "No transcript yet.",
+            )}</div>
+          </div>
+        `;
+
+        const detailsHtml = `
+          <div class="details-panel">
+            <form id="metadata-form" class="section">
+              <h2>Metadata</h2>
+              <div class="count">Editing metadata or speakers queues this recording for a fresh summary.</div>
+              <div class="metadata-grid">
+                <div class="field full">
+                  <label for="title">Title</label>
+                  <input id="title" value="${escapeHtml(title)}" />
+                </div>
+                <div class="field full">
+                  <label for="company">Company</label>
+                  <input id="company" list="company-options" value="${escapeHtml(company)}" />
+                  <datalist id="company-options">
+                    ${companyOptions
+                      .map((name) => `<option value="${escapeHtml(name)}"></option>`)
+                      .join("")}
+                  </datalist>
+                </div>
+              </div>
+              <div style="margin-top: 12px;">
+                <button id="metadata-save" type="submit" disabled>Save metadata</button>
+              </div>
+            </form>
+
+            <div class="section">
+              <h2>Speakers${candidates.length ? ` (${candidates.length})` : ""}</h2>
+              <div id="speaker-grid" class="speaker-grid">
+                ${
+	                  candidates.length
+	                    ? candidates
+	                        .map(
+	                          (candidate) => `
+	                            <div class="speaker-row">
+	                              <div class="speaker-key">${escapeHtml(candidate)}</div>
+	                              <input data-speaker-key="${escapeHtml(candidate)}" data-original="${escapeHtml(speakerValue(speakerMap, candidate))}" value="${escapeHtml(speakerValue(speakerMap, candidate))}" placeholder="${
+	                                candidate === "Me" ? "Adi" : "person name"
+	                              }" />
+	                            </div>
+	                          `,
+	                        )
+	                        .join("")
+	                    : '<div class="count">No speaker labels found yet.</div>'
+	                }
+	              </div>
+	              ${
+	                candidates.length
+	                  ? `<div style="margin-top: 12px;">
+	                      <button id="save-speakers" type="button" disabled>Speakers saved</button>
+	                    </div>`
+	                  : ""
+	              }
+	            </div>
+	          </div>
+	        `;
+
+        el.detail.innerHTML = `
+          <div class="detail-header">
+            <div class="detail-top">
+              <div>
+                <h1 class="detail-title">${escapeHtml(title)}</h1>
+                <div class="pills">
+                  <span class="pill">${escapeHtml(item.status || "unknown")}</span>
+                  ${item.source ? `<span class="pill">${escapeHtml(item.source)}</span>` : ""}
+                  <span class="pill">${escapeHtml(formatDate(item.startedAt))}</span>
+                  ${
+                    item.company
+                      ? `<span class="pill">${escapeHtml(item.company)}</span>`
+                      : ""
+                  }
+                  ${
+                    item.hasTranscript
+	                      ? '<span class="pill">Transcript</span>'
+	                      : '<span class="pill">No transcript</span>'
+	                  }
+	                  ${enrichmentPill}
+	                </div>
+	              </div>
+	              <div class="toolbar">
+	                <div class="copy-group" aria-label="Recording actions">
+	                  <div class="copy-group-label">Actions</div>
+	                  <button id="copy-summary" type="button" ${
+	                    detail.summaryMarkdown ? "" : "disabled"
+	                  }>Copy summary</button>
+	                  <button id="copy-transcript" type="button" class="secondary">Copy transcript</button>
+	                  <button id="copy-meeting" type="button" class="secondary">Copy recording</button>
+	                  <button id="show-meeting-folder" type="button" class="secondary">Show in Finder</button>
+	                  <button id="copy-company" type="button" class="secondary">Copy ${escapeHtml(copyCompanyLabel)}</button>
+	                </div>
+	                <button id="delete-meeting" type="button" class="danger">${
+	                  state.pendingDeleteId === item.id ? "Confirm move" : "Move out"
+	                }</button>
+	              </div>
+	            </div>
+            <div class="detail-tabs">
+              ${tabButton("summary", "Summary")}
+              ${tabButton("transcript", "Transcript")}
+              ${tabButton("details", "Details")}
+            </div>
+          </div>
+          <div class="detail-body">
+            ${
+              activeTab === "summary"
+                ? summaryHtml
+                : activeTab === "transcript"
+                  ? transcriptHtml
+                  : detailsHtml
+            }
+          </div>
+        `;
+
+        for (const button of document.querySelectorAll("[data-detail-tab]")) {
+          button.addEventListener("click", () => {
+            state.activeDetailTab = button.dataset.detailTab;
+            renderDetail();
+          });
+        }
+        document
+          .getElementById("metadata-form")
+          ?.addEventListener("submit", saveMetadata);
+        const titleInput = document.getElementById("title");
+        const companyInput = document.getElementById("company");
+        titleInput?.setAttribute("data-original", title);
+        companyInput?.setAttribute("data-original", company);
+        titleInput?.addEventListener("input", syncMetadataButton);
+        companyInput?.addEventListener("input", syncMetadataButton);
+        syncMetadataButton();
+        for (const input of document.querySelectorAll("[data-speaker-key]")) {
+          input.addEventListener("input", syncSpeakerButton);
+        }
+        syncSpeakerButton();
+        document.getElementById("save-speakers")?.addEventListener("click", saveSpeakers);
+        document
+          .getElementById("copy-summary")
+          .addEventListener("click", copySummary);
+        document
+          .getElementById("copy-transcript")
+          .addEventListener("click", copyTranscript);
+        document
+          .getElementById("copy-meeting")
+          .addEventListener("click", copyMeeting);
+        document
+          .getElementById("show-meeting-folder")
+          .addEventListener("click", showMeetingFolder);
+        document
+          .getElementById("copy-company")
+          .addEventListener("click", copyCompany);
+        document
+          .getElementById("delete-meeting")
+          .addEventListener("click", deleteMeeting);
+      }
+
+      function syncMetadataButton() {
+        const button = document.getElementById("metadata-save");
+        const titleInput = document.getElementById("title");
+        const companyInput = document.getElementById("company");
+        if (!button || !titleInput || !companyInput) return;
+
+        const originalTitle = titleInput.dataset.original ?? "";
+        const originalCompany = companyInput.dataset.original ?? "Individual Networking";
+        const currentTitle = titleInput.value.trim();
+        const currentCompany = companyInput.value.trim() || "Individual Networking";
+        button.disabled =
+          currentTitle === originalTitle.trim() &&
+          currentCompany === originalCompany.trim();
+        button.textContent = button.disabled ? "Saved" : "Save metadata";
+      }
+
+      function syncSpeakerButton() {
+        const button = document.getElementById("save-speakers");
+        if (!button) return;
+        const inputs = Array.from(document.querySelectorAll("[data-speaker-key]"));
+        const changed = inputs.some(
+          (input) => input.value.trim() !== (input.dataset.original ?? "").trim(),
+        );
+        button.disabled = !changed;
+        button.textContent = changed ? "Save speakers" : "Speakers saved";
+      }
+
+      async function saveMetadata(event) {
+        event.preventDefault();
+        if (!state.selectedId) return;
+        try {
+          setStatus("Saving metadata.");
+          const company =
+            document.getElementById("company").value.trim() ||
+            "Individual Networking";
+          const updated = await invoke("update_meeting_metadata", {
+            request: {
+              id: state.selectedId,
+              title: document.getElementById("title").value,
+              company,
+              context: company,
+              contextKind: "Company",
+            },
+          });
+          state.detail = updated;
+          state.selectedId = updated.item.id;
+          const nextContext = updated.item.company ?? "";
+          if (
+            state.selectedContext &&
+            state.selectedContext !== "Review Needed" &&
+            nextContext !== state.selectedContext
+          ) {
+            state.selectedContext = nextContext;
+          }
+          await loadMeetings(updated.item.id);
+          setStatus("Saved metadata.");
+          showToast("Metadata saved.");
+        } catch (error) {
+          setStatus(error.message);
+          showToast(error.message);
+        }
+      }
+
+      async function saveSpeakers() {
+        if (!state.selectedId) return;
+        try {
+          const speakerMap = {};
+          for (const input of document.querySelectorAll("[data-speaker-key]")) {
+            if (input.value.trim()) {
+              speakerMap[input.dataset.speakerKey] = input.value.trim();
+            }
+          }
+          setStatus("Saving speaker map.");
+          state.detail = await invoke("apply_speaker_map", {
+            request: {
+              id: state.selectedId,
+              speakerMap,
+            },
+          });
+          await loadMeetings(state.selectedId);
+          setStatus("Speakers saved.");
+          showToast("Speakers saved.");
+        } catch (error) {
+          setStatus(error.message);
+          showToast(error.message);
+        }
+      }
+
+      async function writeClipboard(text, message = "Copied.") {
+        await invoke("copy_text_to_clipboard", { text });
+        setStatus(message);
+        showToast(message);
+      }
+
+      async function copyTranscript() {
+        try {
+          const transcript = state.detail?.transcriptMarkdown;
+          if (!transcript) {
+            setStatus("No transcript to copy.");
+            showToast("No transcript to copy.");
+            return;
+          }
+          await writeClipboard(transcript, "Copied transcript.");
+        } catch (error) {
+          setStatus(error.message);
+          showToast(error.message);
+        }
+      }
+
+      async function copySummary() {
+        try {
+          const summary = state.detail?.summaryMarkdown;
+          if (!summary) {
+            setStatus("No summary to copy.");
+            showToast("No summary to copy.");
+            return;
+          }
+          await writeClipboard(summary, "Copied summary.");
+        } catch (error) {
+          setStatus(error.message);
+          showToast(error.message);
+        }
+      }
+
+      async function copyMeeting() {
+        try {
+          if (!state.selectedId) return;
+          const text = await invoke("copy_meeting_for_llm", { id: state.selectedId });
+          await writeClipboard(text, "Copied this recording.");
+        } catch (error) {
+          setStatus(error.message);
+          showToast(error.message);
+        }
+      }
+
+      async function showMeetingFolder() {
+        try {
+          const path = state.detail?.paths?.sessionDir;
+          if (!path) {
+            setStatus("No recording folder available.");
+            showToast("No recording folder available.");
+            return;
+          }
+          await invoke("open_path", { path });
+          setStatus("Opened recording folder in Finder.");
+          showToast("Opened recording folder in Finder.");
+        } catch (error) {
+          setStatus(error.message);
+          showToast(error.message);
+        }
+      }
+
+      async function copyCompany() {
+        try {
+          const company =
+            state.detail?.metadata?.company ??
+            state.detail?.item?.company ??
+            "Individual Networking";
+          const text = await invoke("copy_company_for_llm", { company });
+          const label = company === "Individual Networking" ? "networking" : company;
+          await writeClipboard(text, `Copied all ${label} conversations.`);
+        } catch (error) {
+          setStatus(error.message);
+          showToast(error.message);
+        }
+      }
+
+	      async function deleteMeeting() {
+	        const id = state.selectedId;
+	        if (!id) return;
+
+        if (state.pendingDeleteId !== id) {
+          state.pendingDeleteId = id;
+          clearTimeout(state.pendingDeleteTimer);
+          state.pendingDeleteTimer = setTimeout(() => {
+            if (state.pendingDeleteId === id) {
+              state.pendingDeleteId = null;
+              renderDetail();
+              setStatus("Move cancelled.");
+            }
+          }, 8000);
+          renderDetail();
+          setStatus("Click Confirm move to move this recording out of the active archive.");
+          showToast("Click Confirm move to move this recording out of the active archive.");
+          return;
+        }
+
+        try {
+          clearTimeout(state.pendingDeleteTimer);
+          state.pendingDeleteId = null;
+          setStatus("Moving recording out of the archive.");
+          const summary = await invoke("delete_meeting", { id });
+          state.selectedMeetingIds.delete(id);
+          clearPendingBatchDelete();
+          state.selectedId = null;
+          state.detail = null;
+          await loadMeetings(null);
+          setStatus(`Moved recording out of the active archive: ${summary.movedTo}.`);
+          showToast("Moved recording out of the active archive.");
+        } catch (error) {
+          setStatus(error.message);
+          showToast(error.message);
+        }
+      }
+
+      async function deleteSelectedMeetings() {
+        const ids = selectedIds();
+        if (!ids.length || state.batchDeleting) return;
+        const count = ids.length;
+        const key = selectionKey();
+
+        if (state.pendingBatchDeleteKey !== key) {
+          state.pendingBatchDeleteKey = key;
+          clearTimeout(state.pendingBatchDeleteTimer);
+          state.pendingBatchDeleteTimer = setTimeout(() => {
+            if (state.pendingBatchDeleteKey === key) {
+              clearPendingBatchDelete();
+              syncSelectionActions();
+              setStatus("Move cancelled.");
+            }
+          }, 8000);
+          syncSelectionActions();
+          setStatus(
+            `Click Confirm move ${formatNumber(
+              count,
+            )} to move selected recordings out of the active archive.`,
+          );
+          showToast(
+            `Click Confirm move ${formatNumber(count)} to move selected recordings.`,
+          );
+          return;
+        }
+
+        try {
+          state.batchDeleting = true;
+          syncSelectionActions();
+          setStatus(`Moving ${formatNumber(count)} recordings out of the archive.`);
+          showToast(`Moving ${formatNumber(count)} recordings.`);
+          const summary = await invoke("delete_meetings", { ids });
+          const deletedIds = new Set(summary.deleted.map((item) => item.id));
+          for (const id of deletedIds) {
+            state.selectedMeetingIds.delete(id);
+          }
+          clearPendingBatchDelete();
+          if (deletedIds.has(state.selectedId)) {
+            state.selectedId = null;
+            state.detail = null;
+          }
+          await loadMeetings(state.selectedId);
+          setStatus(
+            `Moved ${formatNumber(
+              summary.deletedCount,
+            )} recordings out of the active archive.`,
+          );
+          showToast(`Moved ${formatNumber(summary.deletedCount)} recordings.`);
+        } catch (error) {
+          setStatus(error.message);
+          showToast(error.message);
+        } finally {
+          state.batchDeleting = false;
+          syncSelectionActions();
+        }
+      }
+
+      async function runBulkMissingSummaries() {
+        if (state.bulkRunning) return;
+        state.bulkRunning = true;
+        state.bulkProgress = {
+          total: 0,
+          pending: null,
+          startedAt: Date.now(),
+          note: "Checking queue.",
+          details: "",
+          cancellable: false,
+        };
+        syncBulkButton();
+        renderBulkProgress();
+        el.maintenanceMenu.open = false;
+        try {
+          setStatus("Checking summary queue.", { force: true });
+          const queue = await getBulkQueueStatus({ refresh: true });
+          setBulkProgress({
+            total: queue.pendingCount,
+            pending: queue.pendingCount,
+            note: queue.pendingCount
+              ? `${queue.pendingCount} queued. Starting Codex.`
+              : "No summary work queued.",
+            details: queuedItemsDetail(queue.sampleItems),
+            cancellable: Boolean(queue.activePid),
+          });
+
+          if (queue.pendingCount === 0) {
+            setStatus("No summary work queued.", { force: true });
+            showToast("No summary work queued.", { duration: 9000 });
+            return;
+          }
+
+          setStatus(
+            `Codex summarizing queued recordings (0/${queue.pendingCount}).`,
+            { force: true },
+          );
+          showToast("Codex summarizing queued recordings.", { duration: 9000 });
+          startBulkMonitor();
+          const summary = await invoke("run_codex_bulk_enrichment", {
+            request: {
+              operation: "missingSummaries",
+              refresh: true,
+            },
+          });
+          stopBulkMonitor();
+          await loadMeetings(state.selectedId);
+          const base =
+            summary.candidateCount === 0
+              ? "No summary work queued."
+              : `Codex wrote ${summary.completedCount} of ${summary.candidateCount} queued summaries.`;
+          const failureDetail = codexFailureDetail(summary);
+          const message = summary.success
+            ? base
+            : summary.cancelled
+              ? `${base} Cancelled; press Summarize queued again to resume.`
+              : summary.resumable
+              ? `${base} ${summary.remainingCount} still queued; press Summarize queued again to continue${
+                  failureDetail ? `: ${failureDetail}` : "."
+                }`
+              : `${base} Codex exited ${
+                  summary.exitCode ?? "without a code"
+                }${failureDetail ? `: ${failureDetail}` : "."}`;
+          setBulkProgress({
+            total: summary.candidateCount,
+            pending: summary.remainingCount,
+            note: message,
+            details: failureDetail ? `Last output: ${failureDetail}` : "",
+            cancellable: false,
+          });
+          setStatus(message, { force: true });
+          showToast(message, { duration: 9000 });
+        } catch (error) {
+          stopBulkMonitor();
+          const message = errorMessage(error);
+          setBulkProgress({
+            note: `Codex cleanup stopped: ${message}`,
+            details: "",
+            cancellable: false,
+          });
+          setStatus(message, { force: true });
+          showToast(message, { duration: 9000 });
+        } finally {
+          stopBulkMonitor();
+          state.bulkRunning = false;
+          syncBulkButton();
+          renderBulkProgress();
+        }
+      }
+
+      el.refresh.addEventListener("click", () =>
+        loadMeetings().catch((error) => setStatus(error.message)),
+      );
+      el.selectVisible.addEventListener("click", toggleVisibleSelection);
+      el.selectionClear.addEventListener("click", clearSelection);
+      el.selectionDelete.addEventListener("click", deleteSelectedMeetings);
+      el.rebuild.addEventListener("click", async () => {
+        try {
+          el.maintenanceMenu.open = false;
+          await rebuildAndLoad();
+        } catch (error) {
+          setStatus(error.message);
+          showToast(error.message);
+        }
+      });
+      el.bulkSummarize.addEventListener("click", runBulkMissingSummaries);
+      el.bulkCancel.addEventListener("click", async () => {
+        try {
+          const cancelled = await invoke("cancel_codex_bulk_enrichment");
+          setBulkProgress({
+            note: cancelled
+              ? "Cancellation requested. Waiting for Codex to stop."
+              : "No active Codex job found.",
+            details: "",
+            cancellable: false,
+          });
+          setStatus(cancelled ? "Cancelling Codex cleanup." : "No active Codex job found.", {
+            force: true,
+          });
+        } catch (error) {
+          setStatus(error.message, { force: true });
+          showToast(error.message);
+        }
+      });
+      el.exportAll.addEventListener("click", async () => {
+        try {
+          el.maintenanceMenu.open = false;
+          setStatus("Exporting recordings.");
+          showToast("Exporting recordings.");
+          const summary = await invoke("export_meetings", {
+            request: {},
+          });
+          setStatus(`Exported ${summary.meetingsExported} recordings to ${summary.path}.`);
+          showToast(`Exported ${summary.meetingsExported} recordings.`, {
+            label: "Open index",
+            duration: 9000,
+            handler: () => invoke("open_path", { path: `${summary.path}/index.md` }),
+          });
+        } catch (error) {
+          setStatus(error.message);
+          showToast(error.message);
+        }
+      });
+
+      async function rebuildAndLoad() {
+        setStatus("Re-scanning archive files.");
+        showToast("Re-scanning archive files.");
+        const summary = await invoke("rebuild_meeting_index");
+        await loadMeetings();
+        setStatus(
+          `Indexed ${summary.meetingsIndexed} recordings across ${summary.contextsIndexed} groups.`,
+        );
+        showToast(
+          `Indexed ${summary.meetingsIndexed} recordings across ${summary.contextsIndexed} groups.`,
+        );
+      }
+
+      const debouncedLoad = debounce(() => {
+        syncSearchClear();
+        loadMeetings().catch((error) => setStatus(error.message));
+	      }, 250);
+	      el.query.addEventListener("input", debouncedLoad);
+      el.query.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && el.query.value) {
+          el.query.value = "";
+          syncSearchClear();
+          loadMeetings(null).catch((error) => setStatus(error.message));
+        }
+      });
+      el.queryClear.addEventListener("click", () => {
+        el.query.value = "";
+        syncSearchClear();
+        loadMeetings(null).catch((error) => setStatus(error.message));
+      });
+
+	      syncBulkButton();
+      syncSearchClear();
+	      loadMeetings().catch((error) => setStatus(error.message));
+	    </script>
+  </body>
+</html>

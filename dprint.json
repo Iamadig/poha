@@ -1,0 +1,41 @@
+{
+  "excludes": [
+    "**/*-lock.yaml",
+    "**/*-lock.json",
+    "**/.build",
+    "**/*.gen.*",
+    "**/dist",
+    "**/generated/**",
+    "**/gen/**",
+    "**/node_modules",
+    "**/permissions/**",
+    "**/public",
+    "**/target"
+  ],
+  "exec": {
+    "cwd": "${configDir}",
+    "commands": [
+      {
+        "command": "rustfmt --edition 2024",
+        "exts": ["rs"],
+        "cacheKeyFiles": ["rust-toolchain.toml"]
+      },
+      {
+        "command": "swift format",
+        "exts": ["swift"]
+      },
+      {
+        "command": "pnpm exec oxfmt --stdin-filepath {{file_path}}",
+        "exts": ["js", "ts", "jsx", "tsx", "mjs", "mts"],
+        "cacheKeyFiles": ["package.json"]
+      }
+    ]
+  },
+  "plugins": [
+    "https://plugins.dprint.dev/g-plane/pretty_yaml-v0.5.0.wasm",
+    "https://plugins.dprint.dev/toml-0.6.4.wasm",
+    "https://plugins.dprint.dev/exec-0.6.0.json@a054130d458f124f9b5c91484833828950723a5af3f8ff2bd1523bd47b83b364",
+    "https://plugins.dprint.dev/json-0.20.0.wasm",
+    "https://plugins.dprint.dev/markdown-0.17.8.wasm"
+  ]
+}

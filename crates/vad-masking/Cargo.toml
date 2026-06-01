@@ -1,0 +1,15 @@
+[package]
+name = "vad-masking"
+version = "0.1.0"
+edition = "2024"
+
+[dev-dependencies]
+clap = { workspace = true, features = ["derive"] }
+hound = { workspace = true }
+poha-audacity = { workspace = true }
+poha-data = { workspace = true }
+rodio = { workspace = true }
+
+[dependencies]
+poha-audio-utils = { workspace = true }
+poha-vad = { workspace = true, features = ["earshot"] }

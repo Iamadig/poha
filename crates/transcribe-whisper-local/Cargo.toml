@@ -1,0 +1,50 @@
+[package]
+name = "transcribe-whisper-local"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+coreml = ["poha-whisper-local/coreml"]
+directml = ["poha-pyannote-local/directml"]
+cuda = ["poha-whisper-local/cuda"]
+hipblas = ["poha-whisper-local/hipblas"]
+openblas = ["poha-whisper-local/openblas"]
+metal = ["poha-whisper-local/metal"]
+vulkan = ["poha-whisper-local/vulkan"]
+openmp = ["poha-whisper-local/openmp"]
+[dev-dependencies]
+bytes = { workspace = true }
+dirs = { workspace = true }
+futures-util = { workspace = true }
+owhisper-client = { workspace = true }
+poha-data = { workspace = true }
+reqwest = { workspace = true, features = ["json", "stream"] }
+tokio-tungstenite = { workspace = true }
+
+[dependencies]
+owhisper-interface = { workspace = true }
+poha-audio-chunking = { workspace = true }
+poha-audio-interface = { workspace = true }
+poha-audio-utils = { workspace = true }
+poha-model-manager = { workspace = true, features = ["whisper-local"] }
+poha-pyannote-local = { workspace = true }
+poha-transcribe-core = { workspace = true }
+poha-whisper = { workspace = true }
+poha-whisper-local = { workspace = true }
+poha-ws-utils = { workspace = true }
+
+bytes = { workspace = true }
+serde_html_form = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+
+axum = { workspace = true, features = ["ws"] }
+futures-util = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tower = { workspace = true }
+tracing = { workspace = true }
+
+rodio = { workspace = true }

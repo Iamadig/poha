@@ -1,0 +1,275 @@
+[profile.dev]
+incremental = true
+opt-level = 0
+debug = true
+
+[profile.dev.package."*"]
+opt-level = 1
+debug = false
+
+[workspace]
+resolver = "2"
+members = [
+  "apps/poha/src-tauri",
+  "crates/aec",
+  "crates/am",
+  "crates/analytics",
+  "crates/askama-utils",
+  "crates/audacity",
+  "crates/audio",
+  "crates/audio-actual",
+  "crates/audio-chunking",
+  "crates/audio-device",
+  "crates/audio-interface",
+  "crates/audio-mime",
+  "crates/audio-mock",
+  "crates/audio-snapshot",
+  "crates/audio-sync",
+  "crates/audio-utils",
+  "crates/buffer",
+  "crates/cactus",
+  "crates/cactus-model",
+  "crates/data",
+  "crates/denoise",
+  "crates/device-monitor",
+  "crates/docs",
+  "crates/download-interface",
+  "crates/file",
+  "crates/hooks",
+  "crates/host",
+  "crates/intercept",
+  "crates/language",
+  "crates/listener-core",
+  "crates/listener2-core",
+  "crates/llm-types",
+  "crates/local-model",
+  "crates/model-downloader",
+  "crates/model-manager",
+  "crates/mp3",
+  "crates/observability",
+  "crates/onnx",
+  "crates/openai-transcription",
+  "crates/openrouter",
+  "crates/owhisper-client",
+  "crates/owhisper-interface",
+  "crates/pyannote-local",
+  "crates/resampler",
+  "crates/s3",
+  "crates/soniox",
+  "crates/storage",
+  "crates/supervisor",
+  "crates/tcc",
+  "crates/template-app",
+  "crates/template-eval",
+  "crates/template-support",
+  "crates/transcribe-cactus",
+  "crates/transcribe-core",
+  "crates/transcribe-whisper-local",
+  "crates/transcript",
+  "crates/transcription-core",
+  "crates/vad",
+  "crates/vad-masking",
+  "crates/whisper",
+  "crates/whisper-local",
+  "crates/whisper-local-model",
+  "crates/ws-client",
+  "crates/ws-utils",
+  "plugins/analytics",
+  "plugins/audio-priority",
+  "plugins/hooks",
+  "plugins/local-stt",
+  "plugins/misc",
+  "plugins/settings",
+  "plugins/sfx",
+  "plugins/sidecar2",
+  "plugins/store2",
+  "plugins/tracing",
+  "plugins/transcription",
+  "plugins/tray",
+  "plugins/updater2",
+  "plugins/windows",
+]
+
+[workspace.dependencies]
+anyhow = "1"
+approx = "0.5.1"
+askama = "0.15"
+askama_parser = "0.15"
+async-openai = { version = "0.27.2", default-features = false }
+async-stream = "0.3.6"
+axum = "0.8"
+axum-extra = "0.12"
+backon = "1.6.0"
+base64 = "0.22.1"
+block2 = "0.6"
+bytes = "1.11"
+camino = "1"
+chrono = "0.4"
+cidre = "0.15"
+clap = "4"
+codes-iso-639 = "0.1.5"
+cpal = "0.17"
+criterion = "0.8"
+crossterm = { version = "0.29", features = ["event-stream"] }
+dasp = { version = "0.11.0", features = ["interpolate", "interpolate-linear"] }
+deepgram = { version = "0.7", default-features = false }
+dirs = "6.0.0"
+earshot = "0.1.0"
+futures-channel = "0.3.31"
+futures-util = "0.3.31"
+hound = "3.5.1"
+http = "1"
+insta = "1.46"
+isolang = "2.4"
+jsonschema = "0.46.0"
+lazy_static = "1.5.0"
+markdown = "1"
+mdast_util_to_markdown = "0.0.2"
+mp3lame-encoder = "0.2.2"
+objc2 = "0.6"
+objc2-app-kit = "0.3.2"
+objc2-av-foundation = "0.3.2"
+objc2-foundation = "0.3.2"
+open = "5"
+openai-transcription = { path = "crates/openai-transcription", package = "openai-transcription" }
+opentelemetry = "0.30"
+opentelemetry_sdk = "0.30"
+owhisper-client = { path = "crates/owhisper-client", package = "owhisper-client" }
+owhisper-interface = { path = "crates/owhisper-interface", package = "owhisper-interface" }
+pico-args = "0.5"
+pin-project = "1"
+poha-aec = { path = "crates/aec", package = "aec" }
+poha-am = { path = "crates/am", package = "am" }
+poha-analytics = { path = "crates/analytics", package = "analytics" }
+poha-askama-utils = { path = "crates/askama-utils", package = "askama-utils" }
+poha-audacity = { path = "crates/audacity", package = "audacity" }
+poha-audio = { path = "crates/audio", package = "audio" }
+poha-audio-actual = { path = "crates/audio-actual", package = "audio-actual" }
+poha-audio-chunking = { path = "crates/audio-chunking", package = "audio-chunking" }
+poha-audio-device = { path = "crates/audio-device", package = "audio-device" }
+poha-audio-interface = { path = "crates/audio-interface", package = "audio-interface" }
+poha-audio-mime = { path = "crates/audio-mime", package = "audio-mime" }
+poha-audio-mock = { path = "crates/audio-mock", package = "audio-mock" }
+poha-audio-snapshot = { path = "crates/audio-snapshot", package = "audio-snapshot" }
+poha-audio-sync = { path = "crates/audio-sync", package = "audio-sync" }
+poha-audio-utils = { path = "crates/audio-utils", package = "audio-utils" }
+poha-buffer = { path = "crates/buffer", package = "buffer" }
+poha-cactus = { path = "crates/cactus", package = "cactus" }
+poha-cactus-model = { path = "crates/cactus-model", package = "cactus-model" }
+poha-data = { path = "crates/data", package = "data" }
+poha-denoise = { path = "crates/denoise", package = "denoise" }
+poha-device-monitor = { path = "crates/device-monitor", package = "device-monitor" }
+poha-docs = { path = "crates/docs", package = "docs" }
+poha-download-interface = { path = "crates/download-interface", package = "download-interface" }
+poha-file = { path = "crates/file", package = "file" }
+poha-hooks = { path = "crates/hooks", package = "hooks" }
+poha-host = { path = "crates/host", package = "host" }
+poha-intercept = { path = "crates/intercept", package = "intercept" }
+poha-language = { path = "crates/language", package = "language" }
+poha-listener-core = { path = "crates/listener-core", package = "listener-core" }
+poha-listener2-core = { path = "crates/listener2-core", package = "listener2-core" }
+poha-llm-types = { path = "crates/llm-types", package = "llm-types" }
+poha-local-model = { path = "crates/local-model", package = "local-model" }
+poha-model-downloader = { path = "crates/model-downloader", package = "model-downloader" }
+poha-model-manager = { path = "crates/model-manager", package = "model-manager" }
+poha-mp3 = { path = "crates/mp3", package = "mp3" }
+poha-observability = { path = "crates/observability", package = "observability" }
+poha-onnx = { path = "crates/onnx", package = "onnx" }
+poha-openrouter = { path = "crates/openrouter", package = "openrouter" }
+poha-pyannote-local = { path = "crates/pyannote-local", package = "pyannote-local" }
+poha-resampler = { path = "crates/resampler", package = "resampler" }
+poha-s3 = { path = "crates/s3", package = "s3" }
+poha-storage = { path = "crates/storage", package = "storage" }
+poha-supervisor = { path = "crates/supervisor", package = "supervisor" }
+poha-tcc = { path = "crates/tcc", package = "tcc" }
+poha-template-app = { path = "crates/template-app", package = "template-app" }
+poha-template-eval = { path = "crates/template-eval", package = "template-eval" }
+poha-template-support = { path = "crates/template-support", package = "template-support" }
+poha-transcribe-cactus = { path = "crates/transcribe-cactus", package = "transcribe-cactus" }
+poha-transcribe-core = { path = "crates/transcribe-core", package = "transcribe-core" }
+poha-transcribe-whisper-local = { path = "crates/transcribe-whisper-local", package = "transcribe-whisper-local" }
+poha-transcript = { path = "crates/transcript", package = "transcript" }
+poha-transcription-core = { path = "crates/transcription-core", package = "transcription-core" }
+poha-vad = { path = "crates/vad", package = "vad" }
+poha-vad-masking = { path = "crates/vad-masking", package = "vad-masking" }
+poha-whisper = { path = "crates/whisper", package = "whisper" }
+poha-whisper-local = { path = "crates/whisper-local", package = "whisper-local" }
+poha-whisper-local-model = { path = "crates/whisper-local-model", package = "whisper-local-model" }
+poha-ws-client = { path = "crates/ws-client", package = "ws-client" }
+poha-ws-utils = { path = "crates/ws-utils", package = "ws-utils" }
+posthog-rs = "0.5"
+ractor = "0.15.10"
+realfft = "3.5.0"
+regex = "1.12"
+reqwest = "0.13"
+reqwest-middleware = "0.5"
+reqwest-tracing = "0.6"
+ringbuf = "0.4.8"
+rodio = "0.22"
+rusqlite = "0.39"
+schemars = "1"
+sentry = "=0.42.0"
+serde = "1"
+serde_bytes = "0.11.15"
+serde_html_form = "0.4"
+serde_json = "1"
+serde_yaml = "0.9"
+serial_test = "3"
+shellexpand = "3"
+similar = "2.7.0"
+soniox = { path = "crates/soniox", package = "soniox" }
+specta = "2.0.0-rc.22"
+specta-typescript = "0.0.9"
+strum = "0.28"
+swift-rs = { git = "https://github.com/yujonglee/swift-rs", rev = "41a1605" }
+sysinfo = "0.38"
+tauri = "2.10"
+tauri-build = "2.5"
+tauri-plugin = "2.5"
+tauri-plugin-analytics = { path = "plugins/analytics" }
+tauri-plugin-audio-priority = { path = "plugins/audio-priority" }
+tauri-plugin-clipboard-manager = "2.3"
+tauri-plugin-dialog = "2.7"
+tauri-plugin-hooks = { path = "plugins/hooks" }
+tauri-plugin-local-stt = { path = "plugins/local-stt" }
+tauri-plugin-misc = { path = "plugins/misc" }
+tauri-plugin-notification = "2.3"
+tauri-plugin-os = "2.3"
+tauri-plugin-sentry = "0.5"
+tauri-plugin-settings = { path = "plugins/settings" }
+tauri-plugin-sfx = { path = "plugins/sfx" }
+tauri-plugin-shell = "2.3"
+tauri-plugin-sidecar2 = { path = "plugins/sidecar2" }
+tauri-plugin-single-instance = "2.4"
+tauri-plugin-store = "2.4"
+tauri-plugin-store2 = { path = "plugins/store2" }
+tauri-plugin-tracing = { path = "plugins/tracing" }
+tauri-plugin-transcription = { path = "plugins/transcription" }
+tauri-plugin-tray = { path = "plugins/tray" }
+tauri-plugin-updater = "2.10"
+tauri-plugin-updater2 = { path = "plugins/updater2" }
+tauri-plugin-window-state = "2.4"
+tauri-plugin-windows = { path = "plugins/windows" }
+tauri-specta = "2.0.0-rc.21"
+tempfile = "3"
+testcontainers-modules = "0.12.1"
+thiserror = "2"
+tokio = "1"
+tokio-stream = "0.1.17"
+tokio-tungstenite = "0.29"
+tokio-util = "0.7.15"
+tower = "0.5"
+tower-http = "0.6"
+tracing = "0.1"
+tracing-opentelemetry = "0.31"
+tracing-subscriber = "0.3"
+url = "2"
+utoipa = { version = "5", features = ["axum_extras"] }
+uuid = "1"
+vergen-gix = "9"
+vorbis_rs = "0.5.5"
+wasapi = "0.23.0"
+whichlang = "0.1"
+windows = "0.62.2"
+windows-core = "0.62.2"
+wiremock = "0.6"

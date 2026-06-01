@@ -1,0 +1,58 @@
+[package]
+name = "poha"
+version = "0.1.0"
+default-run = "poha"
+edition = "2024"
+description = "Poha menubar app"
+
+[lib]
+name = "poha_lib"
+crate-type = ["staticlib", "rlib"]
+
+[build-dependencies]
+tauri-build = { workspace = true }
+
+[dependencies]
+tauri = { workspace = true, features = ["image-png", "macos-private-api", "tray-icon"] }
+
+tauri-plugin-audio-priority = { workspace = true }
+tauri-plugin-clipboard-manager = { workspace = true }
+tauri-plugin-notification = { workspace = true }
+tauri-plugin-settings = { workspace = true }
+tauri-plugin-single-instance = { workspace = true }
+tauri-plugin-tracing = { workspace = true }
+tauri-plugin-transcription = { workspace = true, features = ["always-stem-audio"] }
+tauri-plugin-tray = { workspace = true }
+
+poha-audio-actual = { workspace = true }
+poha-audio-utils = { workspace = true }
+poha-language = { workspace = true }
+poha-mp3 = { workspace = true }
+poha-tcc = { workspace = true }
+
+block2 = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+dirs = { workspace = true }
+hound = { workspace = true }
+objc2 = { workspace = true }
+objc2-av-foundation = { workspace = true }
+open = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tracing = { workspace = true }
+uuid = { workspace = true, features = ["v4", "serde"] }
+
+[dev-dependencies]
+poha-data = { workspace = true }
+tempfile = { workspace = true }
+
+[[bin]]
+name = "poha-cli"
+path = "src/bin/poha-cli.rs"
+
+[[bin]]
+name = "poha_cli"
+path = "src/bin/poha_cli.rs"

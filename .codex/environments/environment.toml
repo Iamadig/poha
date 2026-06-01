@@ -1,0 +1,10 @@
+version = 1
+name = "poha"
+
+[setup]
+script = "pnpm install"
+
+[[actions]]
+name = "Run Poha"
+icon = "run"
+command = "./script/build_and_run.sh"

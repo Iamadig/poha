@@ -1,0 +1,50 @@
+[package]
+name = "listener-core"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+specta = ["dep:specta"]
+tauri-event = ["specta", "dep:tauri-specta"]
+always-stem-audio = []
+
+[dependencies]
+poha-audio = { workspace = true }
+poha-audio-utils = { workspace = true }
+poha-device-monitor = { workspace = true }
+poha-host = { workspace = true }
+poha-language = { workspace = true }
+poha-storage = { workspace = true }
+poha-supervisor = { workspace = true }
+poha-transcript = { workspace = true }
+poha-vad-masking = { workspace = true }
+
+owhisper-client = { workspace = true }
+owhisper-interface = { workspace = true }
+
+hound = { workspace = true }
+poha-mp3 = { workspace = true }
+vorbis_rs = { workspace = true }
+
+ractor = { workspace = true, features = ["async-trait"] }
+
+bytes = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+specta = { workspace = true, optional = true }
+tauri-specta = { workspace = true, optional = true, features = ["derive"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+sentry = { workspace = true }
+
+[dev-dependencies]
+poha-data = { workspace = true }
+tempfile = { workspace = true }
+tracing-subscriber = { workspace = true }

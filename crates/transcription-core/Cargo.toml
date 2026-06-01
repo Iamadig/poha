@@ -1,0 +1,21 @@
+[package]
+name = "transcription-core"
+version = "0.1.0"
+edition = "2024"
+description = ""
+
+[features]
+default = []
+specta = [
+  "poha-listener-core/specta",
+  "poha-listener2-core/specta",
+]
+tauri-event = [
+  "poha-listener-core/tauri-event",
+  "poha-listener2-core/tauri-event",
+]
+always-stem-audio = ["poha-listener-core/always-stem-audio"]
+
+[dependencies]
+poha-listener-core = { workspace = true }
+poha-listener2-core = { workspace = true }

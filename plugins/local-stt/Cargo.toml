@@ -1,0 +1,88 @@
+[package]
+name = "tauri-plugin-local-stt"
+version = "0.1.0"
+authors = ["You"]
+edition = "2024"
+exclude = ["/js", "/node_modules"]
+links = "tauri-plugin-local-stt"
+description = ""
+
+[features]
+default = []
+whisper-cpp = ["dep:poha-transcribe-whisper-local", "dep:poha-whisper-local"]
+coreml = ["whisper-cpp", "poha-transcribe-whisper-local/coreml"]
+directml = ["whisper-cpp", "poha-transcribe-whisper-local/directml"]
+cuda = ["whisper-cpp", "poha-transcribe-whisper-local/cuda"]
+hipblas = ["whisper-cpp", "poha-transcribe-whisper-local/hipblas"]
+openblas = ["whisper-cpp", "poha-transcribe-whisper-local/openblas"]
+metal = ["whisper-cpp", "poha-transcribe-whisper-local/metal"]
+vulkan = ["whisper-cpp", "poha-transcribe-whisper-local/vulkan"]
+openmp = ["whisper-cpp", "poha-transcribe-whisper-local/openmp"]
+[build-dependencies]
+tauri-plugin = { workspace = true, features = ["build"] }
+
+[dev-dependencies]
+poha-audio-utils = { workspace = true }
+poha-data = { workspace = true }
+poha-language = { workspace = true, features = ["whisper"] }
+
+dirs = { workspace = true }
+reqwest = { workspace = true }
+rodio = { workspace = true }
+similar = { workspace = true }
+specta-typescript = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tower = { workspace = true }
+
+[dependencies]
+poha-am = { workspace = true }
+poha-audio-utils = { workspace = true }
+poha-cactus-model = { workspace = true }
+poha-download-interface = { workspace = true }
+poha-file = { workspace = true }
+poha-host = { workspace = true }
+poha-language = { workspace = true, features = ["whisper"] }
+poha-local-model = { workspace = true }
+poha-model-downloader = { workspace = true, features = ["specta"] }
+poha-transcribe-whisper-local = { workspace = true, optional = true }
+poha-whisper-local = { workspace = true, optional = true }
+poha-whisper-local-model = { workspace = true }
+
+owhisper-client = { workspace = true }
+owhisper-interface = { workspace = true }
+
+tauri = { workspace = true, features = ["test"] }
+tauri-specta = { workspace = true, features = ["derive", "typescript"] }
+
+tauri-plugin-settings = { workspace = true }
+tauri-plugin-shell = { workspace = true }
+tauri-plugin-sidecar2 = { workspace = true }
+tauri-plugin-windows = { workspace = true }
+
+dirs = { workspace = true }
+json-patch = "4"
+serde = { workspace = true }
+serde_json = { workspace = true }
+specta = { workspace = true }
+strum = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+
+axum = { workspace = true, features = ["ws"] }
+axum-extra = { workspace = true, features = ["query"] }
+tower-http = { workspace = true, features = ["cors", "trace"] }
+
+backon = { workspace = true }
+futures-util = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+poha-supervisor = { workspace = true }
+ractor = { workspace = true, features = ["async-trait"] }
+
+port-killer = "0.1.0"
+port_check = "0.3.0"
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+poha-transcribe-cactus = { workspace = true }
