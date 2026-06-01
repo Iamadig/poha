@@ -1,2 +1,16 @@
 * text=auto eol=lf
-apps/desktop/src-tauri/resources/llm.gguf filter=lfs diff=lfs merge=lfs -text
+*.aac binary
+*.aiff binary
+*.caf binary
+*.flac binary
+*.icns binary
+*.ico binary
+*.m4a binary
+*.mp3 binary
+*.mp4 binary
+*.ogg binary
+*.onnx binary
+*.opus binary
+*.png binary
+*.wav binary
+*.webm binary

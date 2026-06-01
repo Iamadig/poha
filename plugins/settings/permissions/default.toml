@@ -1,3 +1,19 @@
 [default]
 description = "Default permissions for the plugin"
-permissions = ["allow-global-base", "allow-vault-base", "allow-copy-vault", "allow-move-vault", "allow-set-vault-base", "allow-obsidian-vaults", "allow-path", "allow-load", "allow-save"]
+permissions = [
+    "allow-global-base",
+    "allow-vault-base",
+    "allow-obsidian-vaults",
+    "allow-path",
+    "allow-load",
+    "allow-save",
+]
+
+[[set]]
+identifier = "vault-management"
+description = "Allows changing, copying, or moving the configured vault base."
+permissions = [
+    "allow-copy-vault",
+    "allow-move-vault",
+    "allow-set-vault-base",
+]

@@ -9,6 +9,9 @@
   "app": {
     "withGlobalTauri": true,
     "macOSPrivateApi": true,
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data:; connect-src 'self' http://localhost:50060 http://127.0.0.1:50060; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    },
     "windows": [
       {
         "label": "main",

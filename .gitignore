@@ -8,9 +8,6 @@ Secrets*.toml
 !.env.sample
 .venv
 **/__pycache__/
-.supabase/
-.stripe/
-supabase/.seed/
 
 *storybook.log
 .cache/
@@ -20,12 +17,8 @@ internal
 
 **/examples/out/
 
-# Local Netlify folder
-.netlify
-
 # TypeScript incremental build cache
 *.tsbuildinfo
 
 # Agent scratch / reference material (not for commit)
 .tmp/
-

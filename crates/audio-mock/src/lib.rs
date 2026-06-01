@@ -16,8 +16,8 @@ use tokio_util::sync::CancellationToken;
 pub use poha_audio::{AudioProvider, CaptureConfig, CaptureFrame, CaptureStream, Error};
 
 const MOCK_MIC_DEVICE_NAME: &str = "mock-mic";
-const MOCK_MIC_AUDIO_ENV: &str = "HYPR_MOCK_MIC_AUDIO";
-const MOCK_SPK_AUDIO_ENV: &str = "HYPR_MOCK_SPK_AUDIO";
+const MOCK_MIC_AUDIO_ENV: &str = "POHA_MOCK_MIC_AUDIO";
+const MOCK_SPK_AUDIO_ENV: &str = "POHA_MOCK_SPK_AUDIO";
 const MOCK_PLAYBACK_ENV: &str = "MOCK_PLAYBACK";
 
 struct AudioPaths {

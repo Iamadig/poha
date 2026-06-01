@@ -11,7 +11,7 @@
         "builtin",
         "external"
       ],
-      "hypr-internal",
+      "poha-internal",
       "app-internal",
       [
         "parent",
@@ -22,9 +22,9 @@
     ],
     "customGroups": [
       {
-        "groupName": "hypr-internal",
+        "groupName": "poha-internal",
         "elementNamePattern": [
-          "@hypr/**"
+          "@poha/**"
         ]
       },
       {
@@ -49,9 +49,6 @@
     "**/target",
     "**/__pycache__",
     "crates",
-    "apps/desktop/dist",
-    "apps/desktop/src-tauri",
-    "apps/web/dist",
-    "apps/web/.content-collections"
+    "apps/poha/dist"
   ]
 }

@@ -168,7 +168,7 @@ Decision scorecard:
 
 Platforms:
 
-- Zoom internal meeting.
+- Zoom organization-hosted meeting.
 - Zoom external meeting.
 - Google Meet personal/consumer.
 - Google Meet Workspace restricted access.

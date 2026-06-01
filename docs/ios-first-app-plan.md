@@ -27,8 +27,6 @@ XcodeBuildMCP was used to inspect the local iOS build surface.
 
 Implication: Poha needs a new iOS app target under this repo. Before simulator verification, fix local Xcode CLI setup so `xcrun simctl list` works.
 
-The recall skill was attempted for project memory. Watercooler returned `403 Forbidden`, so this plan uses local source and official docs.
-
 ## Product Shape
 
 Poha iOS V1 has one job: make phone-based conversation capture reliable, even when direct capture is not technically possible on iOS.

@@ -92,17 +92,26 @@ fn transform_mentions_in_markdown(markdown: &str) -> String {
     let re = regex::Regex::new(r"@\[([^\]]+)\]\(([^:]+):([^)]+)\)").unwrap();
 
     re.replace_all(markdown, |caps: &regex::Captures| {
-        let label = &caps[1];
-        let mention_type = &caps[2];
-        let id = &caps[3];
+        let label = escape_html(&caps[1]);
+        let mention_type = escape_html(&caps[2]);
+        let id = escape_html(&caps[3]);
 
         let app_url = format!("/app/{}/{}", mention_type, id);
 
         format!(
-            r#"<a class="mention" data-mention="true" data-id="{}" data-type="{}" data-label="{}" href="javascript:void(0)" onclick="event.preventDefault(); if (window.__HYPR_NAVIGATE__) window.__HYPR_NAVIGATE__('{}');">@{}</a>"#,
+            r#"<a class="mention" data-mention="true" data-id="{}" data-type="{}" data-label="{}" href="{}">@{}</a>"#,
             id, mention_type, label, app_url, label
         )
     }).to_string()
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 fn remove_char_repeat(text: &mut String) {
@@ -472,5 +481,17 @@ mod tests {
         assert!(html.contains(r#"data-id="jane-workspace""#));
         assert!(html.contains(r#"data-type="workspace""#));
         assert!(html.contains(r#"@Jane Smith"#));
+    }
+
+    #[test]
+    fn mention_transformation_escapes_label_and_id() {
+        let input = "Hello @[<script>alert(1)</script>](user:bad-id)!";
+
+        let html = opinionated_md_to_html(input).unwrap();
+
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(!html.contains("<script>"));
+        assert!(!html.contains(r#"" onclick="#));
+        assert!(!html.contains("javascript:void"));
     }
 }

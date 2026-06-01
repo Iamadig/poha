@@ -61,9 +61,9 @@ impl<'a, R: tauri::Runtime, M: Manager<R>> Sidecar2<'a, R, M> {
 #[cfg(debug_assertions)]
 fn resolve_debug_paths(binary_name: &str) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
     let passthrough = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../apps/desktop/src-tauri/resources/passthrough-aarch64-apple-darwin");
+        .join("../../apps/poha/src-tauri/resources/passthrough-aarch64-apple-darwin");
     let binary = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
-        "../../apps/desktop/src-tauri/resources/{}-aarch64-apple-darwin",
+        "../../apps/poha/src-tauri/resources/{}-aarch64-apple-darwin",
         binary_name
     ));
 

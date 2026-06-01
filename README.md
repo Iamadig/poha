@@ -2,6 +2,8 @@
 
 Poha is a macOS menu bar meeting recorder. It records locally, writes session files to disk, transcribes in speech-boundary chunks, and exposes an agent-safe CLI for reading session artifacts.
 
+This repository is the public source tree for Poha. It does not currently publish signed or notarized binaries; build from source if you want to test it locally.
+
 ## Layout
 
 - `apps/poha/` - Tauri menu bar app.
@@ -35,7 +37,13 @@ pnpm poha:build
 
 Poha records and transcribes locally. The standalone app does not configure a remote crash-reporting DSN, and analytics are inactive unless a build explicitly compiles in a valid `POSTHOG_API_KEY`.
 
-Release builds should document any enabled network analytics, model downloads, or cloud transcription settings before distribution.
+Poha can also run an optional Codex bulk-enrichment flow for missing summaries. That flow invokes the local `codex` CLI with access to the recordings directory so it can read transcripts and write summaries through `poha-cli`. Treat this as external AI processing according to your Codex account and backend settings.
+
+Release builds should document any enabled network analytics, model downloads, cloud transcription settings, or AI enrichment features before distribution.
+
+## Bundled Assets
+
+Poha currently includes local model files, test audio fixtures, UI sounds, and icons. Known source and license notes are tracked in `THIRD_PARTY_NOTICES.md`. Keep that file current when adding, replacing, or redistributing bundled assets.
 
 ## CLI
 

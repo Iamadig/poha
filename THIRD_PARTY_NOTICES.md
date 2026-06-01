@@ -1,8 +1,8 @@
 # Third-Party Notices
 
-This file is a release gate, not a completed notice file.
+This file tracks bundled asset provenance for Poha.
 
-Do not publish Poha binaries or make the repository public until every bundled asset below has a source, license, and redistribution decision.
+Some bundled assets still need owner/source confirmation before broad redistribution or binary releases. Keep unresolved items visible here rather than hiding the uncertainty.
 
 ## Bundled Asset Audit
 
@@ -60,4 +60,4 @@ Unused `crates/data` text-only fixtures `english_4` through `english_9` were rem
 
 ## Current Recommendation
 
-Do not remove or replace bundled assets until there is a product decision. The ONNX model files mostly have identifiable upstream sources now. The remaining open-source blockers are the uncited audio fixtures, uncited UI sounds, owner attestation for project-created icons, and product/legal acceptance of the VoxCeleb-derived speaker embedding model terms.
+Do not remove or replace bundled assets without a product decision. The ONNX model files mostly have identifiable upstream sources now. The remaining review items are uncited audio fixtures, uncited UI sounds, owner attestation for project-created icons, and product/legal acceptance of the VoxCeleb-derived speaker embedding model terms.

@@ -3,13 +3,13 @@
   "identifier": "default",
   "description": "Poha capability",
   "windows": [
-    "*"
+    "main",
+    "audio-check"
   ],
   "permissions": [
     "core:default",
     "core:window:default",
     "tracing:default",
-    "settings:default",
     "audio-priority:default",
     "core:tray:default",
     "tray:default",

@@ -6,9 +6,6 @@ Default permissions for the plugin
 
 - `allow-global-base`
 - `allow-vault-base`
-- `allow-copy-vault`
-- `allow-move-vault`
-- `allow-set-vault-base`
 - `allow-obsidian-vaults`
 - `allow-path`
 - `allow-load`
@@ -253,6 +250,19 @@ Enables the vault_base command without any pre-configured scope.
 <td>
 
 Denies the vault_base command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`settings:vault-management`
+
+</td>
+<td>
+
+Allows changing, copying, or moving the configured vault base.
 
 </td>
 </tr>
