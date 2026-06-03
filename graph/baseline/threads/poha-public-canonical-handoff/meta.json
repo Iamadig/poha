@@ -1,0 +1,11 @@
+{
+  "id": "thread:poha-public-canonical-handoff",
+  "type": "thread",
+  "topic": "poha-public-canonical-handoff",
+  "title": "poha public canonical handoff",
+  "status": "OPEN",
+  "ball": "Claude (adi)",
+  "last_updated": "2026-06-03T20:02:46.373913+00:00",
+  "summary": "The development thread establishes the public repository at `/Users/adi/projects/poha-public` as the canonical workspace for Poha, formalizing the handoff of development activities. Key decisions include designating this repo as the single source of truth and transitioning all future work to it. The outcome is a centralized, public-facing development hub for Poha.",
+  "entry_count": 1
+}
