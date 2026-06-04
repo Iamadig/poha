@@ -1,0 +1,54 @@
+{
+  "product": "Poha",
+  "angle": "VC-funded note apps are for funded teams; Poha is for bootstrapped founders who want local, open-source meeting memory.",
+  "source": "README.md",
+  "assets": [
+    {
+      "file": "github-hero.png",
+      "size": "1200x630",
+      "use": "GitHub README hero, Open Graph preview",
+      "copy": "Meeting memory for bootstrapped founders."
+    },
+    {
+      "file": "social-square-founder.png",
+      "size": "1080x1080",
+      "use": "X/LinkedIn square post",
+      "copy": "VC-funded note apps are not the only way."
+    },
+    {
+      "file": "social-wide-comparison.png",
+      "size": "1600x900",
+      "use": "X wide image, launch post, blog header",
+      "copy": "Keep the meeting stack small. Keep the evidence local."
+    },
+    {
+      "file": "readme-feature-strip.png",
+      "size": "1400x520",
+      "use": "README feature section image",
+      "copy": "Local recording, chunked transcription, file-backed sessions, agent-safe CLI."
+    },
+    {
+      "file": "social-cli-card.png",
+      "size": "1080x1080",
+      "use": "Developer/agent automation post",
+      "copy": "Your meeting notes should have an API."
+    },
+    {
+      "file": "social-privacy-card.png",
+      "size": "1080x1080",
+      "use": "Privacy/local-first post",
+      "copy": "Default private. Default inspectable."
+    }
+  ],
+  "optionalSharperCopy": [
+    "Granola energy, bootstrapped economics.",
+    "For founders who want meeting memory without another SaaS seat.",
+    "Meetings you can grep.",
+    "Founder-grade, runway-friendly."
+  ],
+  "constraints": [
+    "No third-party logos used.",
+    "No pricing or feature claims about competitors.",
+    "Poha claims are based on README.md."
+  ]
+}

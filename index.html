@@ -1,0 +1,502 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Poha - local-first meeting recorder</title>
+    <meta
+      name="description"
+      content="Poha is a local-first macOS menu bar meeting recorder for bootstrapped founders, with local transcription, durable session files, and an agent-safe CLI."
+    />
+    <meta property="og:title" content="Poha - meeting memory for founders" />
+    <meta
+      property="og:description"
+      content="Local audio, durable transcripts, meeting memory, and JSON tools for agents."
+    />
+    <meta property="og:image" content="assets/promo/github-hero.png" />
+    <style>
+      :root {
+        --ink: #18120d;
+        --paper: #fff8e3;
+        --paper-2: #f7edce;
+        --turmeric: #ffc72c;
+        --leaf: #12825c;
+        --chilli: #ef3f2d;
+        --steel: #d8e7e8;
+        --muted: rgba(24, 18, 13, 0.68);
+        --line: rgba(24, 18, 13, 0.16);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        color: var(--ink);
+        font-family: "Avenir Next", Avenir, "Helvetica Neue", sans-serif;
+        background:
+          radial-gradient(circle at 12% 8%, rgba(255, 199, 44, 0.72), transparent 24rem),
+          radial-gradient(circle at 88% 16%, rgba(18, 130, 92, 0.22), transparent 24rem),
+          linear-gradient(135deg, var(--paper), var(--paper-2));
+      }
+
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        z-index: -1;
+        background-image:
+          linear-gradient(rgba(24, 18, 13, 0.045) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(24, 18, 13, 0.045) 1px, transparent 1px);
+        background-size: 30px 30px;
+      }
+
+      a {
+        color: inherit;
+      }
+
+      .wrap {
+        width: min(1180px, calc(100% - 40px));
+        margin: 0 auto;
+      }
+
+      header {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        border-bottom: 2px solid var(--line);
+        background: rgba(255, 248, 227, 0.88);
+        backdrop-filter: blur(14px);
+      }
+
+      .nav {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        min-height: 72px;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        font-size: 25px;
+        font-weight: 900;
+        text-decoration: none;
+      }
+
+      .mark {
+        width: 44px;
+        height: 44px;
+        display: grid;
+        place-items: center;
+        border: 3px solid var(--ink);
+        border-radius: 13px;
+        background: var(--turmeric);
+        box-shadow: 5px 5px 0 var(--ink);
+      }
+
+      .links {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .links a,
+      .button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 42px;
+        padding: 0 16px;
+        border: 2px solid var(--ink);
+        border-radius: 999px;
+        background: rgba(255, 248, 227, 0.7);
+        box-shadow: 4px 4px 0 var(--ink);
+        font-size: 15px;
+        font-weight: 900;
+        text-decoration: none;
+      }
+
+      .button.primary {
+        background: var(--leaf);
+        color: white;
+      }
+
+      .hero {
+        display: grid;
+        grid-template-columns: 1fr 430px;
+        gap: 54px;
+        min-height: calc(100vh - 72px);
+        align-items: center;
+        padding: 72px 0 80px;
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        padding: 10px 14px;
+        border: 3px solid var(--ink);
+        border-radius: 999px;
+        background: var(--turmeric);
+        box-shadow: 5px 5px 0 var(--ink);
+        font-weight: 900;
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin: 0;
+      }
+
+      h1,
+      h2 {
+        font-family: Georgia, "Times New Roman", serif;
+        font-weight: 500;
+        letter-spacing: 0;
+      }
+
+      h1 {
+        max-width: 790px;
+        margin-top: 28px;
+        font-size: clamp(4rem, 8vw, 7.8rem);
+        line-height: 0.92;
+      }
+
+      .lead {
+        max-width: 680px;
+        margin-top: 28px;
+        color: var(--muted);
+        font-size: clamp(1.2rem, 2.2vw, 1.7rem);
+        line-height: 1.22;
+        font-weight: 760;
+      }
+
+      .cta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 14px;
+        margin-top: 32px;
+      }
+
+      .bowl-card {
+        position: relative;
+        min-height: 560px;
+        border: 3px solid var(--ink);
+        border-radius: 28px;
+        background: rgba(255, 248, 227, 0.72);
+        box-shadow: 14px 14px 0 var(--ink);
+        overflow: hidden;
+      }
+
+      .bowl-card img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+
+      section {
+        padding: 82px 0;
+      }
+
+      .section-head {
+        display: flex;
+        align-items: end;
+        justify-content: space-between;
+        gap: 32px;
+        margin-bottom: 30px;
+      }
+
+      h2 {
+        max-width: 760px;
+        font-size: clamp(3rem, 5vw, 5.5rem);
+        line-height: 0.96;
+      }
+
+      .section-head p {
+        max-width: 420px;
+        color: var(--muted);
+        font-size: 20px;
+        line-height: 1.25;
+        font-weight: 760;
+      }
+
+      .asset-frame {
+        border: 3px solid var(--ink);
+        border-radius: 24px;
+        background: rgba(255, 248, 227, 0.78);
+        box-shadow: 12px 12px 0 var(--ink);
+        overflow: hidden;
+      }
+
+      .asset-frame img {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+
+      .split {
+        display: grid;
+        grid-template-columns: 0.9fr 1.1fr;
+        gap: 28px;
+      }
+
+      .hero > *,
+      .split > * {
+        min-width: 0;
+      }
+
+      .panel {
+        padding: 28px;
+        border: 3px solid var(--ink);
+        border-radius: 24px;
+        background: rgba(255, 248, 227, 0.78);
+        box-shadow: 9px 9px 0 var(--ink);
+      }
+
+      .panel.hot {
+        background: var(--turmeric);
+      }
+
+      .panel.leaf {
+        background: var(--leaf);
+        color: white;
+      }
+
+      .panel h3 {
+        font-size: 30px;
+        line-height: 1.02;
+        font-weight: 900;
+      }
+
+      .panel p,
+      .panel li {
+        color: var(--muted);
+        font-size: 19px;
+        line-height: 1.28;
+        font-weight: 720;
+      }
+
+      .panel.leaf p,
+      .panel.leaf li {
+        color: rgba(255, 248, 227, 0.86);
+      }
+
+      .panel ul {
+        display: grid;
+        gap: 12px;
+        margin: 20px 0 0;
+        padding-left: 22px;
+      }
+
+      .terminal {
+        margin-top: 28px;
+        border: 3px solid var(--ink);
+        border-radius: 22px;
+        background: #17223b;
+        color: var(--paper);
+        box-shadow: 10px 10px 0 var(--ink);
+        overflow: hidden;
+      }
+
+      .terminal-head {
+        height: 52px;
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding-left: 18px;
+        border-bottom: 3px solid var(--ink);
+        background: var(--chilli);
+      }
+
+      .dot {
+        width: 14px;
+        height: 14px;
+        border: 2px solid var(--ink);
+        border-radius: 50%;
+        background: var(--turmeric);
+      }
+
+      pre {
+        margin: 0;
+        padding: 24px;
+        overflow: auto;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 17px;
+        line-height: 1.55;
+        font-weight: 760;
+      }
+
+      .prompt {
+        color: var(--turmeric);
+      }
+
+      footer {
+        padding: 52px 0 70px;
+        border-top: 2px solid var(--line);
+      }
+
+      @media (max-width: 900px) {
+        .wrap {
+          width: min(100% - 28px, 1180px);
+        }
+
+        .links {
+          display: none;
+        }
+
+        .hero,
+        .split {
+          grid-template-columns: 1fr;
+        }
+
+        .bowl-card {
+          min-height: auto;
+        }
+
+        .bowl-card,
+        .asset-frame,
+        .panel,
+        .terminal {
+          box-shadow: 6px 6px 0 var(--ink);
+        }
+
+        .hero {
+          gap: 34px;
+          padding-top: 44px;
+        }
+
+        section {
+          padding: 54px 0;
+        }
+
+        .section-head {
+          display: block;
+        }
+
+        .section-head p {
+          margin-top: 16px;
+        }
+
+        pre {
+          white-space: pre-wrap;
+          word-break: break-word;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <nav class="wrap nav">
+        <a class="brand" href="#"><span class="mark">P</span>Poha</a>
+        <div class="links">
+          <a href="#features">Features</a>
+          <a href="#agents">Agents</a>
+          <a href="#run">Run</a>
+          <a class="button primary" href="https://github.com/iamadig/poha">GitHub</a>
+        </div>
+      </nav>
+    </header>
+
+    <main>
+      <section class="wrap hero">
+        <div>
+          <span class="eyebrow">Poha is for breakfast.</span>
+          <h1>Meeting memory for founders who still read every bill.</h1>
+          <p class="lead">
+            A local-first macOS menu bar recorder that captures calls, writes durable session artifacts,
+            transcribes locally, and exposes a JSON CLI for agents.
+          </p>
+          <div class="cta">
+            <a class="button primary" href="https://github.com/iamadig/poha">View on GitHub</a>
+            <a class="button" href="#run">Build from source</a>
+          </div>
+        </div>
+        <div class="bowl-card">
+          <img src="assets/promo/poha-breakfast-poster.png" alt="Poha breakfast poster" />
+        </div>
+      </section>
+
+      <section id="features" class="wrap">
+        <div class="section-head">
+          <h2>The whole meeting thali.</h2>
+          <p>Recording, transcription, meeting memory, storage hygiene, diagnostics, and agent-safe automation in one local app.</p>
+        </div>
+        <div class="asset-frame">
+          <img src="assets/promo/poha-feature-thali.png" alt="Poha feature thali" />
+        </div>
+      </section>
+
+      <section id="agents" class="wrap">
+        <div class="split">
+          <div class="asset-frame">
+            <img src="assets/promo/tadka-cli-square.png" alt="Poha CLI social card" />
+          </div>
+          <div>
+            <div class="panel hot">
+              <h3>Your meeting notes should have an API.</h3>
+              <ul>
+                <li>Read sessions, meetings, transcripts, paths, and storage reports as stable JSON.</li>
+                <li>Constrained writes for summaries, meeting metadata, SQLite index updates, and exports.</li>
+                <li>Source evidence stays protected: no agent rewrites of audio, session JSON, or transcript evidence.</li>
+              </ul>
+            </div>
+            <div class="terminal">
+              <div class="terminal-head"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+              <pre><span class="prompt">$</span> cargo run --manifest-path apps/poha/src-tauri/Cargo.toml --bin poha-cli -- meetings list
+<span class="prompt">$</span> cargo run --manifest-path apps/poha/src-tauri/Cargo.toml --bin poha-cli -- sessions get &lt;session-id&gt; --partial
+<span class="prompt">$</span> cargo run --manifest-path apps/poha/src-tauri/Cargo.toml --bin poha-cli -- diagnostics audio --guided</pre>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="wrap">
+        <div class="split">
+          <div class="panel leaf">
+            <h3>Local by default.</h3>
+            <p>
+              Poha records and transcribes locally. The standalone app does not configure a remote crash-reporting DSN,
+              and analytics are inactive unless a build explicitly compiles in a valid PostHog key.
+            </p>
+          </div>
+          <div class="panel">
+            <h3>Recoverable cleanup.</h3>
+            <p>
+              Storage maintenance validates transcript, audio, chunks, and stems before moving eligible artifacts to
+              macOS Trash. It does not hard-delete meeting evidence.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section id="run" class="wrap">
+        <div class="section-head">
+          <h2>Build it locally.</h2>
+          <p>Poha currently ships as public source. Build from source to test the macOS app.</p>
+        </div>
+        <div class="terminal">
+          <div class="terminal-head"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+          <pre><span class="prompt">$</span> pnpm install
+<span class="prompt">$</span> ./script/build_and_run.sh
+
+<span class="prompt">$</span> pnpm cargo:check
+<span class="prompt">$</span> pnpm test:cli
+<span class="prompt">$</span> pnpm test:transcription</pre>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="wrap">
+        <a class="brand" href="#"><span class="mark">P</span>Poha</a>
+      </div>
+    </footer>
+  </body>
+</html>

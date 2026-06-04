@@ -1,0 +1,47 @@
+{
+  "product": "Poha",
+  "theme": "Play on Granola's 'not for breakfast' ad by making Poha both the Indian breakfast and the meeting recorder.",
+  "assets": [
+    {
+      "file": "poha-breakfast-poster.png",
+      "size": "1080x1350",
+      "use": "Poster-style social image",
+      "copy": "poha is for breakfast. It is also the local-first meeting recorder for bootstrapped founders."
+    },
+    {
+      "file": "granola-poha-square.png",
+      "size": "1080x1080",
+      "use": "Direct parody square",
+      "copy": "granola is not for breakfast. poha is."
+    },
+    {
+      "file": "east-west-breakfast-wide.png",
+      "size": "1600x900",
+      "use": "Wide social image / blog header",
+      "copy": "Western cereal energy. Indian breakfast operating system."
+    },
+    {
+      "file": "readme-breakfast-banner.png",
+      "size": "1400x520",
+      "use": "README banner",
+      "copy": "The breakfast meeting recorder."
+    },
+    {
+      "file": "tadka-cli-square.png",
+      "size": "1080x1080",
+      "use": "Developer/CLI social image",
+      "copy": "Add tadka to your meeting notes."
+    },
+    {
+      "file": "not-saas-seat-square.png",
+      "size": "1080x1080",
+      "use": "Founder economics social image",
+      "copy": "Not another SaaS seat. A hot bowl of local context."
+    }
+  ],
+  "notes": [
+    "No Granola logo used.",
+    "The direct parody line names granola as the breakfast food, not a competitor logo lockup.",
+    "All product claims are based on README.md."
+  ]
+}

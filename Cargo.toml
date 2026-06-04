@@ -13,7 +13,6 @@ members = [
   "apps/poha/src-tauri",
   "crates/aec",
   "crates/am",
-  "crates/analytics",
   "crates/askama-utils",
   "crates/audacity",
   "crates/audio",
@@ -74,7 +73,6 @@ members = [
   "crates/whisper-local-model",
   "crates/ws-client",
   "crates/ws-utils",
-  "plugins/analytics",
   "plugins/audio-priority",
   "plugins/hooks",
   "plugins/local-stt",
@@ -140,7 +138,6 @@ pico-args = "0.5"
 pin-project = "1"
 poha-aec = { path = "crates/aec", package = "aec" }
 poha-am = { path = "crates/am", package = "am" }
-poha-analytics = { path = "crates/analytics", package = "analytics" }
 poha-askama-utils = { path = "crates/askama-utils", package = "askama-utils" }
 poha-audacity = { path = "crates/audacity", package = "audacity" }
 poha-audio = { path = "crates/audio", package = "audio" }
@@ -197,7 +194,6 @@ poha-whisper-local = { path = "crates/whisper-local", package = "whisper-local" 
 poha-whisper-local-model = { path = "crates/whisper-local-model", package = "whisper-local-model" }
 poha-ws-client = { path = "crates/ws-client", package = "ws-client" }
 poha-ws-utils = { path = "crates/ws-utils", package = "ws-utils" }
-posthog-rs = "0.5"
 ractor = "0.15.10"
 realfft = "3.5.0"
 regex = "1.12"
@@ -226,7 +222,6 @@ sysinfo = "0.38"
 tauri = "2.10"
 tauri-build = "2.5"
 tauri-plugin = "2.5"
-tauri-plugin-analytics = { path = "plugins/analytics" }
 tauri-plugin-audio-priority = { path = "plugins/audio-priority" }
 tauri-plugin-clipboard-manager = "2.3"
 tauri-plugin-dialog = "2.7"
