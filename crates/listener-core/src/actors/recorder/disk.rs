@@ -15,6 +15,10 @@ const FINAL_AUDIO_FILE: &str = "audio.mp3";
 const WAV_FILE: &str = "audio.wav";
 const OGG_FILE: &str = "audio.ogg";
 const FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1000);
+const RAW_ONLY_MIC_ACTIVE_DBFS: f64 = -55.0;
+const RAW_ONLY_SYSTEM_QUIET_DBFS: f64 = -62.0;
+const PROCESSED_MIC_MIN_ACTIVE_DBFS: f64 = -65.0;
+const MAX_RAW_ONLY_PROCESSED_ATTENUATION_DB: f64 = 24.0;
 
 pub(super) struct DiskSink {
     writer: Option<hound::WavWriter<BufWriter<File>>>,
@@ -113,11 +117,13 @@ pub(super) fn write_dual(
     processed_mic: Option<&[f32]>,
     spk: &[f32],
 ) -> Result<(), ActorProcessingErr> {
+    let final_mic = select_final_mic(raw_mic, processed_mic, spk);
+
     if let Some(writer) = sink.writer.as_mut() {
         if sink.is_stereo {
-            write_interleaved_stereo(writer, raw_mic, spk)?;
+            write_interleaved_stereo(writer, final_mic, spk)?;
         } else {
-            let mixed = mix_audio_f32(raw_mic, spk);
+            let mixed = mix_audio_f32(final_mic, spk);
             write_mono_samples(writer, &mixed)?;
         }
     }
@@ -134,6 +140,72 @@ pub(super) fn write_dual(
 
     flush_if_due(sink)?;
     Ok(())
+}
+
+fn select_final_mic<'a>(
+    raw_mic: &'a [f32],
+    processed_mic: Option<&'a [f32]>,
+    spk: &[f32],
+) -> &'a [f32] {
+    let Some(processed_mic) = processed_mic else {
+        return raw_mic;
+    };
+
+    if processed_mic_is_safe_for_final_audio(raw_mic, processed_mic, spk) {
+        processed_mic
+    } else {
+        raw_mic
+    }
+}
+
+fn processed_mic_is_safe_for_final_audio(
+    raw_mic: &[f32],
+    processed_mic: &[f32],
+    spk: &[f32],
+) -> bool {
+    if processed_mic.len() != raw_mic.len() {
+        return false;
+    }
+    if processed_mic.iter().any(|sample| !sample.is_finite()) {
+        return false;
+    }
+
+    let raw_dbfs = rms_dbfs(raw_mic);
+    let processed_dbfs = rms_dbfs(processed_mic);
+    let speaker_dbfs = rms_dbfs(spk);
+    let raw_only_speech =
+        raw_dbfs >= RAW_ONLY_MIC_ACTIVE_DBFS && speaker_dbfs < RAW_ONLY_SYSTEM_QUIET_DBFS;
+
+    if raw_only_speech {
+        let attenuation_db = raw_dbfs - processed_dbfs;
+        if processed_dbfs < PROCESSED_MIC_MIN_ACTIVE_DBFS
+            || attenuation_db > MAX_RAW_ONLY_PROCESSED_ATTENUATION_DB
+        {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn rms_dbfs(samples: &[f32]) -> f64 {
+    let mut sum_squares = 0.0_f64;
+    let mut count = 0_u64;
+    for sample in samples.iter().copied().filter(|sample| sample.is_finite()) {
+        let value = f64::from(sample);
+        sum_squares += value * value;
+        count = count.saturating_add(1);
+    }
+    if count == 0 {
+        return f64::NEG_INFINITY;
+    }
+
+    let rms = (sum_squares / count as f64).sqrt();
+    if rms <= 0.0 {
+        f64::NEG_INFINITY
+    } else {
+        20.0 * rms.log10()
+    }
 }
 
 pub(super) fn finalize_disk_sink(sink: &mut DiskSink) -> Result<(), ActorProcessingErr> {
@@ -378,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn write_dual_records_raw_and_processed_mic_as_source_audio() {
+    fn write_dual_uses_processed_mic_for_final_audio_and_keeps_raw_stem() {
         let dir = tempdir().unwrap();
         let session_dir = dir.path().join("session");
         std::fs::create_dir_all(&session_dir).unwrap();
@@ -396,7 +468,7 @@ mod tests {
             .take(4)
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(mixed, vec![0.5, 0.2, -0.5, -0.2]);
+        assert_eq!(mixed, vec![0.25, 0.2, -0.25, -0.2]);
 
         let mut mic_reader = hound::WavReader::open(session_dir.join("audio_mic.wav")).unwrap();
         let mic = mic_reader
@@ -417,6 +489,54 @@ mod tests {
     }
 
     #[test]
+    fn write_dual_falls_back_to_raw_final_audio_when_processed_mic_is_missing() {
+        let dir = tempdir().unwrap();
+        let session_dir = dir.path().join("session");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let mut sink = create_disk_sink(&session_dir).unwrap();
+
+        write_dual(&mut sink, &[0.5, -0.5], None, &[0.2, -0.2]).unwrap();
+        finalize_writer(&mut sink.writer, Some(&sink.wav_path)).unwrap();
+
+        let mixed = read_wav_samples(&session_dir.join(WAV_FILE), 4);
+        assert_eq!(mixed, vec![0.5, 0.2, -0.5, -0.2]);
+    }
+
+    #[test]
+    fn write_dual_falls_back_to_raw_final_audio_when_processed_mic_suppresses_speech() {
+        let dir = tempdir().unwrap();
+        let session_dir = dir.path().join("session");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let mut sink = create_disk_sink(&session_dir).unwrap();
+
+        write_dual(
+            &mut sink,
+            &[0.5, -0.5],
+            Some(&[0.0001, -0.0001]),
+            &[0.0, 0.0],
+        )
+        .unwrap();
+        finalize_writer(&mut sink.writer, Some(&sink.wav_path)).unwrap();
+
+        let mixed = read_wav_samples(&session_dir.join(WAV_FILE), 4);
+        assert_eq!(mixed, vec![0.5, 0.0, -0.5, 0.0]);
+    }
+
+    #[test]
+    fn write_dual_falls_back_to_raw_final_audio_when_processed_mic_is_misaligned() {
+        let dir = tempdir().unwrap();
+        let session_dir = dir.path().join("session");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let mut sink = create_disk_sink(&session_dir).unwrap();
+
+        write_dual(&mut sink, &[0.5, -0.5], Some(&[0.25]), &[0.2, -0.2]).unwrap();
+        finalize_writer(&mut sink.writer, Some(&sink.wav_path)).unwrap();
+
+        let mixed = read_wav_samples(&session_dir.join(WAV_FILE), 4);
+        assert_eq!(mixed, vec![0.5, 0.2, -0.5, -0.2]);
+    }
+
+    #[test]
     fn write_dual_preserves_timebase_when_processed_mic_starts_late() {
         let dir = tempdir().unwrap();
         let session_dir = dir.path().join("session");
@@ -434,5 +554,14 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(samples, vec![0.0, 0.0, 0.3, -0.3]);
+    }
+
+    fn read_wav_samples(path: &Path, count: usize) -> Vec<f32> {
+        let mut reader = hound::WavReader::open(path).unwrap();
+        reader
+            .samples::<f32>()
+            .take(count)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
     }
 }
