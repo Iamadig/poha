@@ -22,3 +22,23 @@ internal
 
 # Agent scratch / reference material (not for commit)
 .tmp/
+
+# Poha recording/session artifacts
+recordings/
+sessions/
+.poha/
+**/.poha/
+**/session.json
+**/meeting.json
+**/summary.md
+**/transcript.md
+**/transcript.partial.md
+**/transcript.json
+**/transcript.live.json
+**/transcript.chunks.json
+**/transcript_chunks/
+**/audio_mic.wav
+**/audio_mic_processed.wav
+**/audio_spk.wav
+**/live-test-report.json
+**/live-test-report.md
