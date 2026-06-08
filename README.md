@@ -35,8 +35,7 @@ Tasks:
 3. Run `pnpm cargo:check` and `pnpm test:cli`.
 4. Start the app with `./script/build_and_run.sh`.
 5. If macOS asks for Microphone or System Audio permissions, tell me exactly where to grant them.
-6. If the app launches, run or explain the guided audio check:
-   `cargo run --manifest-path apps/poha/src-tauri/Cargo.toml --bin poha-cli -- diagnostics audio --guided`.
+6. If the app launches, run or explain the guided audio check from the CLI: `poha-cli diagnostics audio --guided`.
 7. Do not delete user files. If cleanup is needed, move things to Trash only.
 ```
 
@@ -58,12 +57,12 @@ Poha does not currently publish signed or notarized binaries. Build from source 
 Use `poha-cli` when agents, scripts, or local automations need meeting data.
 
 ```sh
-cargo run --manifest-path apps/poha/src-tauri/Cargo.toml --bin poha-cli -- meetings list
-cargo run --manifest-path apps/poha/src-tauri/Cargo.toml --bin poha-cli -- meetings get <meeting-id> --include metadata,transcript,paths
-cargo run --manifest-path apps/poha/src-tauri/Cargo.toml --bin poha-cli -- sessions list
-cargo run --manifest-path apps/poha/src-tauri/Cargo.toml --bin poha-cli -- sessions get <session-id> --partial
-cargo run --manifest-path apps/poha/src-tauri/Cargo.toml --bin poha-cli -- storage maintain --dry-run
-cargo run --manifest-path apps/poha/src-tauri/Cargo.toml --bin poha-cli -- diagnostics audio --guided
+poha-cli meetings list
+poha-cli meetings get <meeting-id> --include metadata,transcript,paths
+poha-cli sessions list
+poha-cli sessions get <session-id> --partial
+poha-cli storage maintain --dry-run
+poha-cli diagnostics audio --guided
 ```
 
 Agent-safe writes are limited to `summary.md`, `meeting.json`, `.poha/meetings.sqlite`, and `.poha/exports`. Poha does not let the CLI rewrite audio, `session.json`, or transcript evidence.
@@ -77,9 +76,9 @@ The boundary is intentional: Codex can annotate, organize, summarize, and export
 Useful agent-oriented commands:
 
 ```sh
-cargo run --manifest-path apps/poha/src-tauri/Cargo.toml --bin poha-cli -- meetings list --needs-enrichment
-cargo run --manifest-path apps/poha/src-tauri/Cargo.toml --bin poha-cli -- capabilities
-cargo run --manifest-path apps/poha/src-tauri/Cargo.toml --bin poha-cli -- spec
+poha-cli meetings list --needs-enrichment
+poha-cli capabilities
+poha-cli spec
 ```
 
 Codex enrichment is external AI processing according to your Codex account and backend settings.
