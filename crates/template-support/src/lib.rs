@@ -5,7 +5,7 @@ pub struct AccountInfo {
     pub email: Option<String>,
     pub full_name: Option<String>,
     pub avatar_url: Option<String>,
-    pub stripe_customer_id: Option<String>,
+    pub billing_customer_id: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type, utoipa::ToSchema)]

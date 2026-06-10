@@ -17,8 +17,6 @@ const DEFAULT_LIST_LIMIT: usize = 100;
 const MAX_LIST_LIMIT: usize = 500;
 const INDIVIDUAL_NETWORKING_COMPANY: &str = "Individual Networking";
 const REVIEW_NEEDED_FILTER: &str = "Review Needed";
-const DEFAULT_ARCHIVE_ROOT: &str =
-    "/Users/adi/Documents/Codex/2026-05-18/i-need-to-reorganize-my-meetings";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -799,7 +797,7 @@ pub fn import_archive_snapshot(
         .archive_root
         .and_then(clean_optional)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_ARCHIVE_ROOT));
+        .ok_or_else(|| "archiveRoot is required".to_string())?;
     let imported_at = Utc::now().to_rfc3339();
     let archive = ArchiveSnapshot::load(&archive_root)?;
     let contexts = archive.contexts.clone();
@@ -3092,18 +3090,18 @@ mod tests {
         );
         std::fs::write(
             dir.path().join("session-1").join("summary.md"),
-            "Follow up with Ravi.",
+            "Follow up with Morgan.",
         )
         .expect("summary");
 
         let summary = rebuild_index(dir.path()).expect("rebuild");
         assert_eq!(summary.meetings_indexed, 1);
 
-        let meetings = list_meetings(dir.path(), Some("Ravi".to_string()), None, None, None)
+        let meetings = list_meetings(dir.path(), Some("Morgan".to_string()), None, None, None)
             .expect("list meetings");
         assert_eq!(meetings.len(), 1);
         assert_eq!(meetings[0].id, "session-1");
-        assert_eq!(meetings[0].title, "Follow up with Ravi.");
+        assert_eq!(meetings[0].title, "Follow up with Morgan.");
         assert!(meetings[0].has_summary);
     }
 
@@ -3117,12 +3115,12 @@ mod tests {
         );
         std::fs::write(
             dir.path().join("session-1").join("summary.md"),
-            "Follow up with Ravi.",
+            "Follow up with Morgan.",
         )
         .expect("summary");
         open_index(dir.path()).expect("open empty index");
 
-        let meetings = list_meetings(dir.path(), Some("Ravi".to_string()), None, None, None)
+        let meetings = list_meetings(dir.path(), Some("Morgan".to_string()), None, None, None)
             .expect("list meetings");
         assert_eq!(meetings.len(), 1);
         assert_eq!(meetings[0].id, "session-1");
@@ -3136,7 +3134,7 @@ mod tests {
             "session-1",
             r#"{"id":"session-1","status":"done","startedAt":"2026-05-19T10:00:00Z"}"#,
         );
-        std::fs::write(session_dir.join("summary.md"), "Follow up with Ravi.").expect("summary");
+        std::fs::write(session_dir.join("summary.md"), "Follow up with Morgan.").expect("summary");
         rebuild_index(dir.path()).expect("rebuild");
 
         let summary = delete_meeting(dir.path(), "session-1").expect("delete");
@@ -3208,10 +3206,14 @@ mod tests {
             "session-1",
             r#"{"id":"session-1","status":"done","startedAt":"2026-05-19T10:00:00Z"}"#,
         );
-        write_transcript_json(&session_dir, "Speaker 1", "We should follow up with Ravi.");
+        write_transcript_json(
+            &session_dir,
+            "Speaker 1",
+            "We should follow up with Morgan.",
+        );
         std::fs::write(
             session_dir.join("transcript.md"),
-            "# Transcript\n\n[00:00] Speaker 1: We should follow up with Ravi.\n",
+            "# Transcript\n\n[00:00] Speaker 1: We should follow up with Morgan.\n",
         )
         .expect("transcript");
 
@@ -3304,17 +3306,17 @@ mod tests {
         write_transcript_json(
             &session_dir,
             "Speaker 1",
-            "Ravi discussed the Nuance hiring plan.",
+            "Morgan discussed the Nuance hiring plan.",
         );
         update_meeting_metadata(
             dir.path(),
             UpdateMeetingMetadataRequest {
                 id: "session-1".to_string(),
-                title: Some("Nuance hiring plan with Ravi".to_string()),
+                title: Some("Nuance hiring plan with Morgan".to_string()),
                 company: Some("Nuance Labs".to_string()),
                 context: Some("Nuance Labs".to_string()),
                 context_kind: Some("Company".to_string()),
-                people: Some(vec!["Ravi".to_string()]),
+                people: Some(vec!["Morgan".to_string()]),
             },
         )
         .expect("metadata");
@@ -3322,7 +3324,7 @@ mod tests {
             dir.path(),
             ApplySpeakerMapRequest {
                 id: "session-1".to_string(),
-                speaker_map: BTreeMap::from([("Speaker 1".to_string(), "Ravi".to_string())]),
+                speaker_map: BTreeMap::from([("Speaker 1".to_string(), "Morgan".to_string())]),
             },
         )
         .expect("speakers");
@@ -3357,17 +3359,17 @@ mod tests {
         write_transcript_json(
             &session_dir,
             "Speaker 1",
-            "Ravi discussed the Nuance hiring plan.",
+            "Morgan discussed the Nuance hiring plan.",
         );
         update_meeting_metadata(
             dir.path(),
             UpdateMeetingMetadataRequest {
                 id: "session-1".to_string(),
-                title: Some("Nuance hiring plan with Ravi".to_string()),
+                title: Some("Nuance hiring plan with Morgan".to_string()),
                 company: Some("Nuance Labs".to_string()),
                 context: Some("Nuance Labs".to_string()),
                 context_kind: Some("Company".to_string()),
-                people: Some(vec!["Ravi".to_string()]),
+                people: Some(vec!["Morgan".to_string()]),
             },
         )
         .expect("metadata");
@@ -3375,7 +3377,7 @@ mod tests {
             dir.path(),
             ApplySpeakerMapRequest {
                 id: "session-1".to_string(),
-                speaker_map: BTreeMap::from([("Speaker 1".to_string(), "Ravi".to_string())]),
+                speaker_map: BTreeMap::from([("Speaker 1".to_string(), "Morgan".to_string())]),
             },
         )
         .expect("speakers");
@@ -3391,11 +3393,11 @@ mod tests {
             dir.path(),
             UpdateMeetingMetadataRequest {
                 id: "session-1".to_string(),
-                title: Some("Updated Nuance hiring plan with Ravi".to_string()),
+                title: Some("Updated Nuance hiring plan with Morgan".to_string()),
                 company: Some("Nuance Labs".to_string()),
                 context: Some("Nuance Labs".to_string()),
                 context_kind: Some("Company".to_string()),
-                people: Some(vec!["Ravi".to_string()]),
+                people: Some(vec!["Morgan".to_string()]),
             },
         )
         .expect("metadata update");
@@ -3426,17 +3428,17 @@ mod tests {
         write_transcript_json(
             &session_dir,
             "Speaker 1",
-            "Ravi discussed the Nuance hiring plan.",
+            "Morgan discussed the Nuance hiring plan.",
         );
         update_meeting_metadata(
             dir.path(),
             UpdateMeetingMetadataRequest {
                 id: "session-1".to_string(),
-                title: Some("Nuance hiring plan with Ravi".to_string()),
+                title: Some("Nuance hiring plan with Morgan".to_string()),
                 company: Some("Nuance Labs".to_string()),
                 context: Some("Nuance Labs".to_string()),
                 context_kind: Some("Company".to_string()),
-                people: Some(vec!["Ravi".to_string()]),
+                people: Some(vec!["Morgan".to_string()]),
             },
         )
         .expect("metadata");
@@ -3444,7 +3446,7 @@ mod tests {
             dir.path(),
             ApplySpeakerMapRequest {
                 id: "session-1".to_string(),
-                speaker_map: BTreeMap::from([("Speaker 1".to_string(), "Ravi".to_string())]),
+                speaker_map: BTreeMap::from([("Speaker 1".to_string(), "Morgan".to_string())]),
             },
         )
         .expect("speakers");
@@ -3460,7 +3462,10 @@ mod tests {
             dir.path(),
             ApplySpeakerMapRequest {
                 id: "session-1".to_string(),
-                speaker_map: BTreeMap::from([("Speaker 1".to_string(), "Ravi Patel".to_string())]),
+                speaker_map: BTreeMap::from([(
+                    "Speaker 1".to_string(),
+                    "Morgan Patel".to_string(),
+                )]),
             },
         )
         .expect("speaker update");
@@ -3484,8 +3489,8 @@ mod tests {
         );
         write_transcript_json(
             &session_dir,
-            "Ravi",
-            "Ravi discussed the Nuance hiring plan.",
+            "Morgan",
+            "Morgan discussed the Nuance hiring plan.",
         );
         std::fs::write(
             session_dir.join("summary.md"),
@@ -3495,11 +3500,11 @@ mod tests {
 
         std::thread::sleep(std::time::Duration::from_millis(25));
         let mut metadata = MeetingMetadata::for_id("session-1");
-        metadata.title = Some("Nuance hiring plan with Ravi".to_string());
+        metadata.title = Some("Nuance hiring plan with Morgan".to_string());
         metadata.company = Some("Nuance Labs".to_string());
         metadata.context = Some("Nuance Labs".to_string());
         metadata.context_kind = Some("Company".to_string());
-        metadata.people = vec!["Ravi".to_string()];
+        metadata.people = vec!["Morgan".to_string()];
         metadata.updated_at = Some(Utc::now().to_rfc3339());
         write_meeting_metadata(&session_dir, &metadata).expect("metadata");
 
@@ -3527,28 +3532,28 @@ mod tests {
             UpdateMeetingMetadataRequest {
                 id: "session-1".to_string(),
                 title: Some("Hiring sync".to_string()),
-                company: Some("Mostly Harmless".to_string()),
-                context: Some("Mostly Harmless".to_string()),
+                company: Some("Acme Labs".to_string()),
+                context: Some("Acme Labs".to_string()),
                 context_kind: Some("Company".to_string()),
-                people: Some(vec!["Adi".to_string(), "Ravi".to_string()]),
+                people: Some(vec!["Riley".to_string(), "Morgan".to_string()]),
             },
         )
         .expect("update metadata");
 
         assert_eq!(detail.item.title, "Hiring sync");
-        assert_eq!(detail.item.company.as_deref(), Some("Mostly Harmless"));
+        assert_eq!(detail.item.company.as_deref(), Some("Acme Labs"));
         assert!(dir.path().join("session-1").join("meeting.json").exists());
 
         let meetings = list_meetings(
             dir.path(),
-            Some("mostly".to_string()),
-            Some("Mostly Harmless".to_string()),
+            Some("acme".to_string()),
+            Some("Acme Labs".to_string()),
             None,
             None,
         )
         .expect("list");
         assert_eq!(meetings.len(), 1);
-        assert_eq!(meetings[0].people, vec!["Adi", "Ravi"]);
+        assert_eq!(meetings[0].people, vec!["Riley", "Morgan"]);
     }
 
     #[test]
@@ -3599,8 +3604,8 @@ mod tests {
         std::fs::write(&transcript_path, "[00:00] Speaker 1: hello\n").expect("write transcript");
 
         let mut speaker_map = BTreeMap::new();
-        speaker_map.insert("Me".to_string(), "Adi".to_string());
-        speaker_map.insert("spk_1".to_string(), "Ravi".to_string());
+        speaker_map.insert("Me".to_string(), "Riley".to_string());
+        speaker_map.insert("spk_1".to_string(), "Morgan".to_string());
         let detail = apply_speaker_map(
             dir.path(),
             ApplySpeakerMapRequest {
@@ -3615,14 +3620,14 @@ mod tests {
                 .transcript_markdown
                 .as_deref()
                 .unwrap_or_default()
-                .contains("Ravi: hello")
+                .contains("Morgan: hello")
         );
         assert!(
             detail
                 .transcript_markdown
                 .as_deref()
                 .unwrap_or_default()
-                .contains("Adi: hi")
+                .contains("Riley: hi")
         );
         assert_eq!(detail.speaker_candidates, vec!["Me", "Speaker 1"]);
         let raw_transcript = std::fs::read_to_string(&transcript_path).expect("raw transcript");
@@ -3632,7 +3637,7 @@ mod tests {
     #[test]
     fn speaker_candidates_hide_mapped_names_and_numeric_duplicates() {
         let mut speaker_map = BTreeMap::new();
-        speaker_map.insert("Me".to_string(), "Adi".to_string());
+        speaker_map.insert("Me".to_string(), "Riley".to_string());
         speaker_map.insert("Speaker 1".to_string(), "Jihad".to_string());
 
         let candidates = speaker_candidates_from_labels(
@@ -3640,7 +3645,7 @@ mod tests {
                 "Me".to_string(),
                 "1".to_string(),
                 "Speaker 1".to_string(),
-                "Adi".to_string(),
+                "Riley".to_string(),
                 "Jihad".to_string(),
             ],
             &speaker_map,
@@ -3670,7 +3675,7 @@ source: "poha"
 
 ## Notes
 
-Bring Ravi into the loop.
+Bring Morgan into the loop.
 
 ## Transcript
 
@@ -3698,13 +3703,15 @@ Bring Ravi into the loop.
         )
         .expect("index");
         std::fs::write(
-            archive.path().join("notion-contexts-sandbox-after-backfill.json"),
+            archive
+                .path()
+                .join("notion-contexts-sandbox-after-backfill.json"),
             serde_json::to_string_pretty(&serde_json::json!({
                 "results": [
                     {
                         "id": "context-1",
                         "properties": {
-                            "Context": { "type": "title", "title": [{"plain_text": "Mostly Harmless"}] },
+                            "Context": { "type": "title", "title": [{"plain_text": "Acme Labs"}] },
                             "Type": { "type": "select", "select": {"name": "Company"} }
                         }
                     }
@@ -3723,7 +3730,7 @@ Bring Ravi into the loop.
                         "properties": {
                             "Original ID": { "type": "rich_text", "rich_text": [{"plain_text": "archive-1"}] },
                             "Meeting Name": { "type": "title", "title": [{"plain_text": "Archive Hiring Sync"}] },
-                            "People": { "type": "multi_select", "multi_select": [{"name": "Ravi"}] },
+                            "People": { "type": "multi_select", "multi_select": [{"name": "Morgan"}] },
                             "Context": { "type": "relation", "relation": [{"id": "context-1"}] }
                         }
                     }
@@ -3745,8 +3752,8 @@ Bring Ravi into the loop.
         assert_eq!(summary.created_sessions, 1);
         let detail = get_meeting(recordings.path(), "archive-1").expect("detail");
         assert_eq!(detail.item.title, "Archive Hiring Sync");
-        assert_eq!(detail.item.company.as_deref(), Some("Mostly Harmless"));
-        assert_eq!(detail.item.people, vec!["Ravi"]);
+        assert_eq!(detail.item.company.as_deref(), Some("Acme Labs"));
+        assert_eq!(detail.item.people, vec!["Morgan"]);
         assert!(
             detail
                 .transcript_markdown
@@ -3852,7 +3859,7 @@ Bring Ravi into the loop.
                 company: None,
                 context: None,
                 context_kind: None,
-                people: Some(vec!["Adi".to_string()]),
+                people: Some(vec!["Riley".to_string()]),
             },
         )
         .expect("metadata");
@@ -3983,7 +3990,7 @@ Bring Ravi into the loop.
                 company: Some("Replit".to_string()),
                 context: Some("Replit".to_string()),
                 context_kind: Some("Company".to_string()),
-                people: Some(vec!["Adi".to_string()]),
+                people: Some(vec!["Riley".to_string()]),
             },
         )
         .expect("moved metadata");
@@ -4009,7 +4016,7 @@ Bring Ravi into the loop.
         assert!(old_context.is_empty());
         assert_eq!(new_context.len(), 1);
         assert_eq!(new_context[0].title, "Moved title");
-        assert_eq!(new_context[0].people, vec!["Adi"]);
+        assert_eq!(new_context[0].people, vec!["Riley"]);
         assert!(contexts.iter().any(|context| context.name == "Replit"));
     }
 

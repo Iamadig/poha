@@ -29,14 +29,14 @@ fn audio_paths_for_selection(selection: u32) -> AudioPaths {
     match selection {
         // MOCK_AUDIO=1
         1 => AudioPaths {
-            mic: poha_data::english_10::AUDIO_MIC_MP3_PATH,
-            spk: poha_data::english_10::AUDIO_SPK_MP3_PATH,
+            mic: poha_data::english_1::AUDIO_MP3_PATH,
+            spk: poha_data::english_1::AUDIO_MP3_PATH,
         },
         // Future selections go here:
         // 2 => AudioPaths { ... },
         _ => AudioPaths {
-            mic: poha_data::english_10::AUDIO_MIC_MP3_PATH,
-            spk: poha_data::english_10::AUDIO_SPK_MP3_PATH,
+            mic: poha_data::english_1::AUDIO_MP3_PATH,
+            spk: poha_data::english_1::AUDIO_MP3_PATH,
         },
     }
 }

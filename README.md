@@ -123,9 +123,8 @@ Codex enrichment is optional and uses the local `codex` CLI. Treat it as externa
 
 - `apps/poha/` - Tauri menu bar app.
 - `apps/poha/src-tauri/src/bin/poha-cli.rs` - JSON CLI for agents and automations.
-- `docs/storage-lifecycle.md` - storage cleanup details.
 - `crates/` and `plugins/` - local Rust crates required by Poha.
 
 ## Assets And Licenses
 
-Poha includes local model files, test audio fixtures, UI sounds, icons, and promotional images. Source and license notes are tracked in `THIRD_PARTY_NOTICES.md`; keep it current when adding or redistributing bundled assets.
+Poha includes local model files, test audio fixtures, UI sounds, icons, and public site images. Source and license notes are tracked in `THIRD_PARTY_NOTICES.md`; keep it current when adding or redistributing bundled assets.
