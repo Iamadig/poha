@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::manifest::AudioArtifactPaths;
 use crate::recorder_settings::{RecorderSettings, SpeakerLabelMode};
+use crate::storage_lifecycle::{SystemTrash, TrashSink};
 
 const RAW_MIC_FILE: &str = "audio_mic.wav";
 const PROCESSED_MIC_FILE: &str = "audio_mic_processed.wav";
@@ -294,9 +295,17 @@ fn copy_audio_artifacts(capture_dir: &Path, output_dir: &Path) -> Result<(), Str
     Ok(())
 }
 
-pub(crate) fn remove_verified_capture_stem_duplicates(
+pub(crate) fn trash_verified_capture_stem_duplicates(
     capture_dir: &Path,
     output_dir: &Path,
+) -> Result<usize, String> {
+    trash_verified_capture_stem_duplicates_with(capture_dir, output_dir, &SystemTrash)
+}
+
+fn trash_verified_capture_stem_duplicates_with(
+    capture_dir: &Path,
+    output_dir: &Path,
+    trash: &dyn TrashSink,
 ) -> Result<usize, String> {
     if capture_dir == output_dir {
         return Ok(0);
@@ -327,10 +336,11 @@ pub(crate) fn remove_verified_capture_stem_duplicates(
     }
 
     for source in &duplicates {
-        std::fs::remove_file(source).map_err(|error| {
+        trash.move_to_trash(source).map_err(|error| {
             format!(
-                "failed removing verified capture duplicate {}: {error}",
-                source.display()
+                "failed moving verified capture duplicate {} to Trash: {}",
+                source.display(),
+                error.message()
             )
         })?;
     }
@@ -2791,9 +2801,10 @@ mod tests {
     }
 
     #[test]
-    fn capture_stem_cleanup_removes_only_byte_identical_archived_duplicates() {
+    fn capture_stem_cleanup_trashes_only_byte_identical_archived_duplicates() {
         let capture = tempdir().expect("capture");
         let output = tempdir().expect("output");
+        let trash_dir = tempdir().expect("trash");
         for (file_name, bytes) in [
             (RAW_MIC_FILE, b"microphone".as_slice()),
             (PROCESSED_MIC_FILE, b"processed".as_slice()),
@@ -2803,13 +2814,34 @@ mod tests {
             std::fs::write(output.path().join(file_name), bytes).expect("output stem");
         }
 
-        let removed =
-            remove_verified_capture_stem_duplicates(capture.path(), output.path()).expect("clean");
+        struct DirectoryTrash<'a>(&'a Path);
+        impl TrashSink for DirectoryTrash<'_> {
+            fn move_to_trash(
+                &self,
+                path: &Path,
+            ) -> Result<(), crate::storage_lifecycle::StorageError> {
+                let file_name = path.file_name().expect("trash file name");
+                std::fs::rename(path, self.0.join(file_name)).map_err(|error| {
+                    crate::storage_lifecycle::StorageError::new(
+                        "testTrashFailed",
+                        error.to_string(),
+                    )
+                })
+            }
+        }
+
+        let removed = trash_verified_capture_stem_duplicates_with(
+            capture.path(),
+            output.path(),
+            &DirectoryTrash(trash_dir.path()),
+        )
+        .expect("clean");
 
         assert_eq!(removed, 3);
         for file_name in [RAW_MIC_FILE, PROCESSED_MIC_FILE, SYSTEM_AUDIO_FILE] {
             assert!(!capture.path().join(file_name).exists());
             assert!(output.path().join(file_name).exists());
+            assert!(trash_dir.path().join(file_name).exists());
         }
     }
 
@@ -2824,8 +2856,22 @@ mod tests {
         std::fs::write(output.path().join(SYSTEM_AUDIO_FILE), b"different")
             .expect("different archived stem");
 
-        let error = remove_verified_capture_stem_duplicates(capture.path(), output.path())
-            .expect_err("mismatch must fail closed");
+        struct DirectoryTrashForMismatch;
+        impl TrashSink for DirectoryTrashForMismatch {
+            fn move_to_trash(
+                &self,
+                _path: &Path,
+            ) -> Result<(), crate::storage_lifecycle::StorageError> {
+                panic!("validation must finish before any Trash operation")
+            }
+        }
+
+        let error = trash_verified_capture_stem_duplicates_with(
+            capture.path(),
+            output.path(),
+            &DirectoryTrashForMismatch,
+        )
+        .expect_err("mismatch must fail closed");
 
         assert!(error.contains("differs"));
         assert!(capture.path().join(RAW_MIC_FILE).exists());

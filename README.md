@@ -75,6 +75,8 @@ New installs default to **Record Only**. Existing settings created before `recor
 
 Record Only archives and validates separate microphone and system-audio stems without running transcription. Stem preservation defaults on for new settings and older settings that lack `preserveStems`; an explicit false value remains respected. Session manifests record the durable paths for `audio_mic.wav`, optional `audio_mic_processed.wav`, and `audio_spk.wav`.
 
+Poha holds an operating-system lease from capture start through finalization, so crash recovery refuses to touch a session that the app is still writing. After a verified archive is committed, byte-identical capture-scratch stems are moved to macOS Trash rather than hard-deleted.
+
 ## Codex Integration
 
 Poha can ask Codex to enrich meetings that need summaries. The app finds missing or stale summaries, invokes the local `codex` CLI, lets Codex read transcripts from the recordings directory, and writes the result back through `poha-cli`.

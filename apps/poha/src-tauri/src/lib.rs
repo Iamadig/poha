@@ -8,6 +8,7 @@ pub mod meeting_store;
 mod recorder_settings;
 mod recording_end_reminder;
 mod recording_end_reminder_runtime;
+mod session_lease;
 pub mod storage_lifecycle;
 mod transcription;
 
@@ -35,15 +36,16 @@ struct AppState {
     controller: Mutex<Option<AppController>>,
     live_transcription: Mutex<Option<transcription::LiveTranscriptionHandle>>,
     audio_check_state: Mutex<Option<audio_check_window::AudioCheckState>>,
+    active_session_lease: Mutex<Option<(String, session_lease::SessionLease)>>,
 }
 
-#[derive(Clone)]
 struct StoppedSessionContext {
     is_live_test: bool,
     live_test_mode: Option<live_test_diagnostics::LiveTestMode>,
     output_dir: PathBuf,
     capture_dir: PathBuf,
     settings: RecorderSettings,
+    _session_lease: Option<session_lease::SessionLease>,
 }
 
 #[derive(Debug, Clone)]
@@ -554,8 +556,18 @@ fn handle_capture_lifecycle_event(app: tauri::AppHandle, event: CaptureLifecycle
             error,
             ..
         } => {
-            let transition = update_controller(&app, |controller| {
-                if controller.active_session_id.as_deref() != Some(session_id.as_str()) {
+            // Moving the lease out of AppState keeps the OS lock continuously
+            // held while finalization runs; recovery cannot race the writer.
+            let session_lease = match take_active_session_lease(&app, &session_id) {
+                Ok(lease) => lease,
+                Err(error) => {
+                    tracing::warn!(session_id, "failed taking active session lease: {error}");
+                    None
+                }
+            };
+            let stopped_session_id = session_id.clone();
+            let transition = update_controller(&app, move |controller| {
+                if controller.active_session_id.as_deref() != Some(stopped_session_id.as_str()) {
                     return Ok(None);
                 }
 
@@ -579,7 +591,7 @@ fn handle_capture_lifecycle_event(app: tauri::AppHandle, event: CaptureLifecycle
                 };
 
                 let is_live_test =
-                    controller.live_test_session_id.as_deref() == Some(session_id.as_str());
+                    controller.live_test_session_id.as_deref() == Some(stopped_session_id.as_str());
                 let live_test_mode = is_live_test.then_some(controller.live_test_mode).flatten();
                 let should_transcribe =
                     is_live_test || settings.recording_mode == RecordingMode::RecordAndTranscribe;
@@ -589,6 +601,7 @@ fn handle_capture_lifecycle_event(app: tauri::AppHandle, event: CaptureLifecycle
                     output_dir,
                     capture_dir,
                     settings,
+                    _session_lease: session_lease,
                 };
 
                 controller.background_transcription_count =
@@ -684,6 +697,7 @@ async fn process_stopped_session(
         output_dir,
         capture_dir,
         settings,
+        _session_lease,
     } = context;
     let capture_error_for_report = capture_error.clone();
 
@@ -1032,7 +1046,7 @@ async fn finalize_record_only_session(
         let cleanup_capture_dir = capture_dir.clone();
         let cleanup_output_dir = output_dir.clone();
         match tauri::async_runtime::spawn_blocking(move || {
-            transcription::remove_verified_capture_stem_duplicates(
+            transcription::trash_verified_capture_stem_duplicates(
                 &cleanup_capture_dir,
                 &cleanup_output_dir,
             )
@@ -1043,16 +1057,16 @@ async fn finalize_record_only_session(
                 tracing::info!(
                     removed,
                     session_id,
-                    "cleaned verified capture stem duplicates"
+                    "moved verified capture stem duplicates to Trash"
                 )
             }
             Ok(Err(error)) => tracing::warn!(
                 session_id,
-                "verified capture stem cleanup was skipped: {error}"
+                "verified capture stem Trash cleanup was skipped: {error}"
             ),
             Err(error) => tracing::warn!(
                 session_id,
-                "verified capture stem cleanup task failed: {error}"
+                "verified capture stem Trash cleanup task failed: {error}"
             ),
         }
     }
@@ -1233,6 +1247,10 @@ pub fn recover_crashed_session(
     request: RecoverSessionRequest,
 ) -> Result<RecoverSessionResult, String> {
     let output_dir = request.recordings_dir.join(&request.session_id);
+    if !output_dir.is_dir() {
+        return Err(format!("session dir not found: {}", output_dir.display()));
+    }
+    let _session_lease = session_lease::SessionLease::acquire(&output_dir)?;
     let mut manifest = manifest::read_manifest(&output_dir)?;
     let capture_dir = PathBuf::from(&manifest.capture_dir);
     if !capture_dir.is_dir() {
@@ -1244,6 +1262,7 @@ pub fn recover_crashed_session(
         .unwrap_or_else(recorder_settings::default_settings_file);
 
     if manifest.recording_mode == RecordingMode::RecordOnly {
+        ensure_record_only_recovery_is_interrupted(&manifest)?;
         manifest.set_status("finalizing");
         manifest::write_manifest(&output_dir, &manifest)?;
         let artifacts = match transcription::archive_audio_artifacts(&capture_dir, &output_dir) {
@@ -1264,11 +1283,11 @@ pub fn recover_crashed_session(
         manifest.mark_recorded(artifacts);
         manifest::write_manifest(&output_dir, &manifest)?;
         if let Err(error) =
-            transcription::remove_verified_capture_stem_duplicates(&capture_dir, &output_dir)
+            transcription::trash_verified_capture_stem_duplicates(&capture_dir, &output_dir)
         {
             tracing::warn!(
                 session_id = request.session_id,
-                "recovered capture stem cleanup was skipped: {error}"
+                "recovered capture stem Trash cleanup was skipped: {error}"
             );
         }
         return Ok(RecoverSessionResult {
@@ -1342,6 +1361,24 @@ pub fn recover_crashed_session(
         capture_dir: capture_dir.to_string_lossy().into_owned(),
         output_dir: output_dir.to_string_lossy().into_owned(),
     })
+}
+
+fn ensure_record_only_recovery_is_interrupted(
+    manifest: &manifest::SessionManifest,
+) -> Result<(), String> {
+    if let Some(error) = manifest.error.as_deref() {
+        return Err(format!(
+            "refusing to recover record-only session {} because capture failed: {error}",
+            manifest.id
+        ));
+    }
+    if matches!(manifest.status.as_str(), "recording" | "finalizing") {
+        return Ok(());
+    }
+    Err(format!(
+        "record-only session {} is not interrupted (status: {}); recovery would overwrite its evidence status",
+        manifest.id, manifest.status
+    ))
 }
 
 fn first_existing_audio(dir: &std::path::Path) -> Option<PathBuf> {
@@ -1466,6 +1503,17 @@ async fn start_recording_inner(
         Ok((settings, output_dir, mic_device_id))
     })??;
     let (settings, output_dir, mic_device_id) = reservation;
+    let session_lease = match session_lease::SessionLease::acquire(&output_dir) {
+        Ok(lease) => lease,
+        Err(error) => {
+            rollback_recording_start(&app, &session_id, "Failed to reserve recording session")?;
+            return Err(error);
+        }
+    };
+    if let Err(error) = set_active_session_lease(&app, &session_id, session_lease) {
+        rollback_recording_start(&app, &session_id, "Failed to reserve recording session")?;
+        return Err(error);
+    }
     refresh_tray(&app);
 
     let mic_device_name = selected_microphone_name(&app, mic_device_id.as_deref());
@@ -1538,6 +1586,7 @@ fn rollback_recording_start(
     session_id: &str,
     detail: &str,
 ) -> Result<(), String> {
+    let _ = take_active_session_lease(app, session_id);
     let rolled_back = update_controller(app, |controller| {
         if controller.active_session_id.as_deref() != Some(session_id) {
             return false;
@@ -2207,6 +2256,42 @@ fn take_live_transcription_handle(
     Ok(guard.take())
 }
 
+fn set_active_session_lease(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    lease: session_lease::SessionLease,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let mut guard = state
+        .active_session_lease
+        .lock()
+        .map_err(|_| "session lease lock poisoned".to_string())?;
+    if guard.is_some() {
+        return Err("another session lease is already active".to_string());
+    }
+    *guard = Some((session_id.to_string(), lease));
+    Ok(())
+}
+
+fn take_active_session_lease(
+    app: &tauri::AppHandle,
+    session_id: &str,
+) -> Result<Option<session_lease::SessionLease>, String> {
+    let state = app.state::<AppState>();
+    let mut guard = state
+        .active_session_lease
+        .lock()
+        .map_err(|_| "session lease lock poisoned".to_string())?;
+    if guard
+        .as_ref()
+        .is_some_and(|(active_session_id, _)| active_session_id == session_id)
+    {
+        Ok(guard.take().map(|(_, lease)| lease))
+    } else {
+        Ok(None)
+    }
+}
+
 fn set_status_detail(app: &tauri::AppHandle, detail: &str) -> Result<(), String> {
     update_controller(app, |controller| {
         controller.status_detail = detail.to_string();
@@ -2453,8 +2538,9 @@ mod tests {
     use std::time::Instant;
 
     use super::{
-        canonical_existing_path, finish_background_transcription,
-        resolve_microphone_permission_state, transcription_error_detail,
+        canonical_existing_path, ensure_record_only_recovery_is_interrupted,
+        finish_background_transcription, resolve_microphone_permission_state,
+        transcription_error_detail,
     };
     use crate::controller::{AppController, PermissionState, RecorderPhase};
     use crate::recorder_settings::RecorderSettings;
@@ -2464,6 +2550,26 @@ mod tests {
     fn uvx_missing_error_is_actionable() {
         let detail = transcription_error_detail("failed to spawn uvx: No such file or directory");
         assert_eq!(detail, "uvx missing (install uv + mlx-whisper)");
+    }
+
+    #[test]
+    fn record_only_recovery_accepts_only_clean_interrupted_states() {
+        let mut manifest = crate::manifest::SessionManifest::recording(
+            "session".to_string(),
+            "/tmp/capture".to_string(),
+        );
+        assert!(ensure_record_only_recovery_is_interrupted(&manifest).is_ok());
+
+        manifest.set_status("finalizing");
+        assert!(ensure_record_only_recovery_is_interrupted(&manifest).is_ok());
+
+        manifest.set_status("recorded");
+        assert!(ensure_record_only_recovery_is_interrupted(&manifest).is_err());
+
+        manifest.mark_error("capture device disconnected".to_string());
+        let error = ensure_record_only_recovery_is_interrupted(&manifest)
+            .expect_err("capture errors must remain authoritative");
+        assert!(error.contains("capture failed"), "{error}");
     }
 
     #[test]
