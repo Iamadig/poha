@@ -1,12 +1,11 @@
 use crate::controller::RecorderPhase;
-use crate::recorder_settings;
 use crate::recording_end_reminder::{
     AudioLevels, RecordingEndReminderAction, RecordingEndReminderConfig, duration_label,
     reminder_status_detail,
 };
 use crate::{
-    AppController, StopRecordingReason, get_controller, refresh_tray, set_controller,
-    stop_recording_inner, update_controller,
+    AppController, StopRecordingReason, refresh_tray, stop_recording_inner,
+    update_and_save_settings, update_controller,
 };
 use tauri::Listener;
 use tauri_plugin_notification::NotificationExt;
@@ -270,16 +269,16 @@ pub fn keep_recording(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 pub fn set_enabled(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
-    let mut controller = get_controller(&app)?;
-    controller.settings.meeting_end_reminders_enabled = enabled;
-    controller.recording_end_reminder.clear();
-    controller.status_detail = if enabled {
-        "Meeting end reminders enabled".to_string()
-    } else {
-        "Meeting end reminders disabled".to_string()
-    };
-    recorder_settings::save(&app, &controller.settings)?;
-    set_controller(&app, controller)?;
+    update_and_save_settings(&app, |controller| {
+        controller.settings.meeting_end_reminders_enabled = enabled;
+        controller.recording_end_reminder.clear();
+        controller.status_detail = if enabled {
+            "Meeting end reminders enabled".to_string()
+        } else {
+            "Meeting end reminders disabled".to_string()
+        };
+        Ok(())
+    })?;
     refresh_tray(&app);
     Ok(())
 }

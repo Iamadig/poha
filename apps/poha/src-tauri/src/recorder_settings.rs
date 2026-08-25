@@ -1,8 +1,11 @@
 use std::path::{Path, PathBuf};
+use std::{fs::OpenOptions, io::Write};
 
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tauri_plugin_settings::SettingsPluginExt;
+
+use crate::meeting_detection::AutomationMode;
 
 const DEFAULT_MLX_MODEL: &str = "mlx-community/whisper-turbo";
 const DEFAULT_MLX_FALLBACK_MODEL: &str = "mlx-community/whisper-turbo";
@@ -49,6 +52,10 @@ pub struct RecorderSettings {
     pub onboarding_completed: bool,
     #[serde(default = "default_meeting_end_reminders_enabled")]
     pub meeting_end_reminders_enabled: bool,
+    #[serde(default)]
+    pub meeting_automation_mode: AutomationMode,
+    #[serde(default)]
+    pub calendar_integration_enabled: bool,
 }
 
 impl RecorderSettings {
@@ -63,6 +70,8 @@ impl RecorderSettings {
             system_audio_authorized_hint: false,
             onboarding_completed: false,
             meeting_end_reminders_enabled: true,
+            meeting_automation_mode: AutomationMode::Off,
+            calendar_integration_enabled: false,
         }
     }
 
@@ -141,6 +150,10 @@ pub fn load_from_file(path: &Path, recordings_dir: PathBuf) -> Result<RecorderSe
 
 pub fn save(app: &AppHandle, settings: &RecorderSettings) -> Result<(), String> {
     let path = settings_file(app)?;
+    save_to_path(&path, settings)
+}
+
+fn save_to_path(path: &Path, settings: &RecorderSettings) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("failed creating settings dir {}: {e}", parent.display()))?;
@@ -148,9 +161,63 @@ pub fn save(app: &AppHandle, settings: &RecorderSettings) -> Result<(), String> 
 
     let data = serde_json::to_string_pretty(settings)
         .map_err(|e| format!("failed serializing settings: {e}"))?;
-    std::fs::write(&path, data)
-        .map_err(|e| format!("failed writing settings file {}: {e}", path.display()))?;
-    Ok(())
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("poha.settings.json");
+    let temp_path = path.with_file_name(format!(
+        ".{file_name}.{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
+
+    let write_result = (|| -> Result<(), String> {
+        let mut temp = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp_path)
+            .map_err(|e| {
+                format!(
+                    "failed creating temporary settings file {}: {e}",
+                    temp_path.display()
+                )
+            })?;
+        temp.write_all(data.as_bytes()).map_err(|e| {
+            format!(
+                "failed writing temporary settings file {}: {e}",
+                temp_path.display()
+            )
+        })?;
+        temp.sync_all().map_err(|e| {
+            format!(
+                "failed syncing temporary settings file {}: {e}",
+                temp_path.display()
+            )
+        })?;
+        drop(temp);
+        std::fs::rename(&temp_path, path).map_err(|e| {
+            format!(
+                "failed replacing settings file {} from {}: {e}",
+                path.display(),
+                temp_path.display()
+            )
+        })?;
+
+        // The file itself is durable before the rename. Syncing the parent
+        // directory makes the rename durable on Unix filesystems; a directory
+        // sync failure is best-effort because the atomic replacement already
+        // succeeded and reporting failure would desynchronize live state from
+        // the newly persisted settings.
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::File::open(parent).and_then(|directory| directory.sync_all());
+        }
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    write_result
 }
 
 pub fn latest_transcript_path(recordings_dir: &Path) -> Option<PathBuf> {
@@ -209,6 +276,8 @@ fn missing_persisted_defaults(settings: &serde_json::Value) -> bool {
         || settings.get("systemAudioAuthorizedHint").is_none()
         || settings.get("onboardingCompleted").is_none()
         || settings.get("meetingEndRemindersEnabled").is_none()
+        || settings.get("meetingAutomationMode").is_none()
+        || settings.get("calendarIntegrationEnabled").is_none()
 }
 
 fn default_meeting_end_reminders_enabled() -> bool {
@@ -231,6 +300,8 @@ mod tests {
             system_audio_authorized_hint: false,
             onboarding_completed: false,
             meeting_end_reminders_enabled: true,
+            meeting_automation_mode: AutomationMode::Off,
+            calendar_integration_enabled: false,
         };
         let (migrated, changed) = migrate_settings(legacy);
         assert!(changed);
@@ -250,6 +321,8 @@ mod tests {
             system_audio_authorized_hint: false,
             onboarding_completed: false,
             meeting_end_reminders_enabled: true,
+            meeting_automation_mode: AutomationMode::Off,
+            calendar_integration_enabled: false,
         };
         let (migrated, changed) = migrate_settings(previous);
         assert!(changed);
@@ -269,6 +342,8 @@ mod tests {
             system_audio_authorized_hint: false,
             onboarding_completed: false,
             meeting_end_reminders_enabled: true,
+            meeting_automation_mode: AutomationMode::Off,
+            calendar_integration_enabled: false,
         };
         let (migrated, changed) = migrate_settings(broken);
         assert!(changed);
@@ -288,6 +363,8 @@ mod tests {
             system_audio_authorized_hint: false,
             onboarding_completed: false,
             meeting_end_reminders_enabled: true,
+            meeting_automation_mode: AutomationMode::Off,
+            calendar_integration_enabled: false,
         };
         let (migrated, changed) = migrate_settings(custom.clone());
         assert!(!changed);
@@ -306,6 +383,8 @@ mod tests {
             system_audio_authorized_hint: false,
             onboarding_completed: false,
             meeting_end_reminders_enabled: true,
+            meeting_automation_mode: AutomationMode::Off,
+            calendar_integration_enabled: false,
         };
         let (migrated, changed) = migrate_settings(legacy);
         assert!(changed);
@@ -338,6 +417,36 @@ mod tests {
 
         let parsed: RecorderSettings = serde_json::from_str(json).expect("parse settings");
         assert!(!parsed.onboarding_completed);
+    }
+
+    #[test]
+    fn meeting_automation_defaults_off_without_calendar_access() {
+        let json = r#"{
+            "recordingsDir":"/tmp/recordings",
+            "mlxModel":"mlx-community/whisper-turbo",
+            "mlxFallbackModel":"mlx-community/whisper-turbo",
+            "micDeviceId":null,
+            "preserveStems":false
+        }"#;
+
+        let parsed: RecorderSettings = serde_json::from_str(json).expect("parse settings");
+        assert_eq!(parsed.meeting_automation_mode, AutomationMode::Off);
+        assert!(!parsed.calendar_integration_enabled);
+    }
+
+    #[test]
+    fn calendar_assisted_mode_uses_prompt_only_settings_name() {
+        let mut settings =
+            RecorderSettings::default_with_recordings_dir(PathBuf::from("/tmp/recordings"));
+        settings.meeting_automation_mode = AutomationMode::CalendarAssisted;
+
+        let json = serde_json::to_value(&settings).expect("serialize settings");
+        assert_eq!(json["meetingAutomationMode"], "calendarAssisted");
+        let reparsed: RecorderSettings = serde_json::from_value(json).expect("parse settings");
+        assert_eq!(
+            reparsed.meeting_automation_mode,
+            AutomationMode::CalendarAssisted
+        );
     }
 
     #[test]

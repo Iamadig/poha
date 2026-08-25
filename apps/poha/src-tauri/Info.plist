@@ -8,5 +8,9 @@
     <string>Poha needs microphone access to capture your voice.</string>
     <key>NSAudioCaptureUsageDescription</key>
     <string>Poha needs system audio access to capture call audio from others.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>Poha uses nearby event times and meeting links to detect calls. Attendees and notes are not read or stored.</string>
+    <key>NSCalendarsUsageDescription</key>
+    <string>Poha uses nearby event times and meeting links to detect calls. Attendees and notes are not read or stored.</string>
   </dict>
 </plist>

@@ -1,10 +1,15 @@
 mod audio_check_window;
+pub mod calendar_source;
 mod codex_enrichment;
 mod commands;
 mod controller;
+pub mod eventkit_calendar;
 mod live_test_diagnostics;
 mod manifest;
+mod meeting_automation_runtime;
+pub mod meeting_detection;
 pub mod meeting_store;
+pub mod native_meeting_activity;
 mod recorder_settings;
 mod recording_end_reminder;
 mod recording_end_reminder_runtime;
@@ -18,6 +23,7 @@ use std::sync::Mutex;
 #[cfg(target_os = "macos")]
 use block2::RcBlock;
 use controller::{AppController, PermissionState, RecorderPhase};
+use meeting_detection::{AutomationMode, MeetingEvidence};
 #[cfg(target_os = "macos")]
 use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio};
 use recorder_settings::{RecorderSettings, SpeakerLabelMode};
@@ -34,8 +40,11 @@ const BATCH_CAPTURE_MODEL: &str = "cactus-parakeet-tdt-0.6b-v3-int8";
 #[derive(Default)]
 struct AppState {
     controller: Mutex<Option<AppController>>,
+    capture_transition: tokio::sync::Mutex<()>,
+    settings_persistence: Mutex<()>,
     live_transcription: Mutex<Option<transcription::LiveTranscriptionHandle>>,
     audio_check_state: Mutex<Option<audio_check_window::AudioCheckState>>,
+    meeting_automation: Mutex<meeting_automation_runtime::MeetingAutomationRuntime>,
 }
 
 #[derive(Clone)]
@@ -129,6 +138,7 @@ pub async fn main() {
             init_controller(&app_handle)?;
             install_menu_handler(&app_handle);
             install_capture_lifecycle_listener(&app_handle);
+            meeting_automation_runtime::install(&app_handle);
             recording_end_reminder_runtime::install(&app_handle);
             install_recording_title_ticker(&app_handle);
             install_permission_status_ticker(&app_handle);
@@ -178,7 +188,7 @@ fn init_controller(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Err
     let last_transcript =
         recorder_settings::latest_transcript_path(&settings.recordings_dir_path());
     let controller = AppController::new(settings, last_transcript);
-    set_controller(app, controller)?;
+    initialize_controller(app, controller)?;
     refresh_tray(app);
     Ok(())
 }
@@ -330,6 +340,88 @@ fn handle_menu_event(app: &tauri::AppHandle, menu_id: &str) {
                 tracing::error!("set_meeting_end_reminders_enabled_failed: {error}");
             }
         }
+        controller::MENU_ID_AUTOMATION_OFF => {
+            if let Err(error) = set_meeting_automation_mode(app.clone(), AutomationMode::Off) {
+                tracing::error!("set_meeting_automation_mode_failed: {error}");
+            }
+        }
+        controller::MENU_ID_AUTOMATION_ASK => {
+            if let Err(error) = set_meeting_automation_mode(app.clone(), AutomationMode::Ask) {
+                tracing::error!("set_meeting_automation_mode_failed: {error}");
+            }
+        }
+        controller::MENU_ID_AUTOMATION_CALENDAR_ASSISTED => {
+            if let Err(error) =
+                set_meeting_automation_mode(app.clone(), AutomationMode::CalendarAssisted)
+            {
+                tracing::error!("set_meeting_automation_mode_failed: {error}");
+                return;
+            }
+            let controller = match get_controller(app) {
+                Ok(controller) => controller,
+                Err(error) => {
+                    tracing::error!("calendar_access_controller_failed: {error}");
+                    return;
+                }
+            };
+            if !controller.settings.calendar_integration_enabled {
+                let expected_generation = match meeting_automation_runtime::calendar_generation(app)
+                {
+                    Ok(generation) => generation,
+                    Err(error) => {
+                        tracing::error!("calendar_generation_failed: {error}");
+                        return;
+                    }
+                };
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) =
+                        meeting_automation_runtime::enable_calendar_for_assisted_mode(
+                            app,
+                            expected_generation,
+                        )
+                        .await
+                    {
+                        tracing::warn!("calendar_access_failed: {error}");
+                    }
+                });
+            }
+        }
+        controller::MENU_ID_TOGGLE_CALENDAR => {
+            let calendar_enabled = get_controller(app)
+                .map(|controller| controller.settings.calendar_integration_enabled)
+                .unwrap_or(false);
+            if calendar_enabled {
+                if let Err(error) = meeting_automation_runtime::disable_calendar(app) {
+                    tracing::error!("disable_calendar_failed: {error}");
+                }
+            } else {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) =
+                        meeting_automation_runtime::enable_calendar_from_user_action(app).await
+                    {
+                        tracing::warn!("calendar_access_failed: {error}");
+                    }
+                });
+            }
+        }
+        controller::MENU_ID_CALENDAR_ACCESS => {
+            open_permission(app.clone(), PermissionTarget::Calendar);
+        }
+        controller::MENU_ID_ACCEPT_DETECTED_MEETING => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = meeting_automation_runtime::accept_pending_prompt(app).await {
+                    tracing::warn!("detected_meeting_accept_failed: {error}");
+                }
+            });
+        }
+        controller::MENU_ID_DISMISS_DETECTED_MEETING => {
+            if let Err(error) = meeting_automation_runtime::dismiss_pending_prompt(app) {
+                tracing::warn!("detected_meeting_dismiss_failed: {error}");
+            }
+        }
         controller::MENU_ID_QUIT => {
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
@@ -341,6 +433,8 @@ fn handle_menu_event(app: &tauri::AppHandle, menu_id: &str) {
 }
 
 async fn request_quit(app: tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    let _capture_transition = state.capture_transition.lock().await;
     let controller = match get_controller(&app) {
         Ok(controller) => controller,
         Err(error) => {
@@ -357,11 +451,6 @@ async fn request_quit(app: tauri::AppHandle) {
         return;
     }
 
-    if !controller.has_active_work() {
-        app.exit(0);
-        return;
-    }
-
     let queued_status = match phase {
         RecorderPhase::Recording => "Stopping capture before quit",
         RecorderPhase::Finalizing => "Finalizing before quit",
@@ -373,39 +462,64 @@ async fn request_quit(app: tauri::AppHandle) {
         RecorderPhase::Idle | RecorderPhase::Done | RecorderPhase::Error => "Quitting",
     };
 
-    if let Err(error) = queue_quit_request(&app, queued_status) {
-        tracing::error!("quit_requested: failed to queue quit: {error}");
+    let had_active_work = match queue_quit_request(&app, queued_status) {
+        Ok(had_active_work) => had_active_work,
+        Err(error) => {
+            tracing::error!("quit_requested: failed to queue quit: {error}");
+            return;
+        }
+    };
+
+    if !had_active_work {
+        app.exit(0);
         return;
     }
 
     if matches!(phase, RecorderPhase::Recording)
-        && let Err(error) = stop_recording(app.clone()).await
+        && let Err(error) = stop_recording_locked(app.clone(), StopRecordingReason::Manual).await
     {
         tracing::error!("quit_requested: failed stopping capture before quit: {error}");
     }
 }
 
-fn queue_quit_request(app: &tauri::AppHandle, detail: &str) -> Result<(), String> {
-    let mut controller = get_controller(app)?;
-    if controller.quit_requested {
-        return Ok(());
+fn queue_quit_request(app: &tauri::AppHandle, detail: &str) -> Result<bool, String> {
+    let had_active_work =
+        update_controller(app, |controller| mark_quit_requested(controller, detail))?;
+    if let Err(error) = meeting_automation_runtime::quit_requested(app) {
+        tracing::warn!(%error, "quit queued but meeting prompt cleanup failed");
     }
-
-    controller.quit_requested = true;
-    controller.status_detail = detail.to_string();
-    set_controller(app, controller)?;
     refresh_tray(app);
-    Ok(())
+    Ok(had_active_work)
 }
 
-#[derive(Debug, Clone, Copy)]
+fn mark_quit_requested(controller: &mut AppController, detail: &str) -> bool {
+    let had_active_work = controller.has_active_work();
+    controller.quit_requested = true;
+    controller.pending_meeting_prompt_title = None;
+    controller.status_detail = detail.to_string();
+    had_active_work
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PermissionTarget {
     Microphone,
     SystemAudio,
+    Calendar,
 }
 
 fn open_permission(app: tauri::AppHandle, permission: PermissionTarget) {
     tauri::async_runtime::spawn(async move {
+        if permission == PermissionTarget::Calendar {
+            if let Err(error) =
+                meeting_automation_runtime::enable_calendar_from_user_action(app.clone()).await
+            {
+                tracing::warn!("calendar permission request failed: {error}");
+                if let Err(settings_error) = open_permission_settings(permission) {
+                    tracing::error!("failed opening calendar settings: {settings_error}");
+                }
+            }
+            return;
+        }
         if let Err(error) = request_permission(&app, permission) {
             tracing::error!("failed requesting permission {:?}: {error}", permission);
         }
@@ -433,6 +547,7 @@ fn request_permission(app: &tauri::AppHandle, permission: PermissionTarget) -> R
                 // Best effort: probing speaker capture triggers Audio Capture prompt when needed.
                 let _ = probe_system_audio_state(app);
             }
+            PermissionTarget::Calendar => {}
         }
     }
 
@@ -466,6 +581,7 @@ fn open_permission_settings(permission: PermissionTarget) -> Result<(), String> 
         let anchor = match permission {
             PermissionTarget::Microphone => "Privacy_Microphone",
             PermissionTarget::SystemAudio => "Privacy_AudioCapture",
+            PermissionTarget::Calendar => "Privacy_Calendars",
         };
 
         let urls = [
@@ -505,7 +621,7 @@ fn open_permission_settings(permission: PermissionTarget) -> Result<(), String> 
 fn handle_capture_lifecycle_event(app: tauri::AppHandle, event: CaptureLifecycleEvent) {
     match event {
         CaptureLifecycleEvent::Started { session_id, .. } => {
-            if let Ok(mut controller) = get_controller(&app) {
+            let _ = update_controller(&app, |controller| {
                 if controller.active_session_id.as_deref() == Some(session_id.as_str()) {
                     controller.phase = RecorderPhase::Recording;
                     controller.status_detail = if controller.live_test_session_id.as_deref()
@@ -521,13 +637,12 @@ fn handle_capture_lifecycle_event(app: tauri::AppHandle, event: CaptureLifecycle
                     controller
                         .recording_end_reminder
                         .reset_for_recording(std::time::Instant::now());
-                    let _ = set_controller(&app, controller);
                 }
-            }
+            });
             refresh_tray(&app);
         }
         CaptureLifecycleEvent::Finalizing { session_id } => {
-            if let Ok(mut controller) = get_controller(&app) {
+            let _ = update_controller(&app, |controller| {
                 if controller.active_session_id.as_deref() == Some(session_id.as_str()) {
                     controller.phase = RecorderPhase::Finalizing;
                     controller.status_detail = if controller.live_test_session_id.as_deref()
@@ -537,9 +652,8 @@ fn handle_capture_lifecycle_event(app: tauri::AppHandle, event: CaptureLifecycle
                     } else {
                         "Finalizing capture".to_string()
                     };
-                    let _ = set_controller(&app, controller);
                 }
-            }
+            });
             refresh_tray(&app);
         }
         CaptureLifecycleEvent::Stopped {
@@ -549,84 +663,80 @@ fn handle_capture_lifecycle_event(app: tauri::AppHandle, event: CaptureLifecycle
             ..
         } => {
             let mut live_handle = None;
-            let context = match get_controller(&app) {
-                Ok(mut controller) => {
-                    let was_active_session =
-                        controller.active_session_id.as_deref() == Some(session_id.as_str());
-                    let is_live_test =
-                        controller.live_test_session_id.as_deref() == Some(session_id.as_str());
-                    let live_test_mode =
-                        is_live_test.then_some(controller.live_test_mode).flatten();
-                    let output_dir = controller.settings.recordings_dir_path().join(&session_id);
-                    let capture_dir = controller
-                        .active_capture_dir
-                        .clone()
-                        .or_else(|| {
-                            audio_path
-                                .as_ref()
-                                .map(PathBuf::from)
-                                .and_then(|p| p.parent().map(ToOwned::to_owned))
-                        })
-                        .unwrap_or_else(|| {
-                            app.settings()
-                                .vault_base()
-                                .map(|base| {
-                                    base.join("sessions").join(&session_id).into_std_path_buf()
-                                })
-                                .unwrap_or_else(|_| PathBuf::from("sessions").join(&session_id))
-                        });
-                    let context = StoppedSessionContext {
-                        is_live_test,
-                        live_test_mode,
-                        output_dir,
-                        capture_dir,
-                        settings: controller.settings.clone(),
-                    };
+            let context = match update_controller(&app, |controller| {
+                let was_active_session =
+                    controller.active_session_id.as_deref() == Some(session_id.as_str());
+                let is_live_test =
+                    controller.live_test_session_id.as_deref() == Some(session_id.as_str());
+                let live_test_mode = is_live_test.then_some(controller.live_test_mode).flatten();
+                let output_dir = controller.settings.recordings_dir_path().join(&session_id);
+                let capture_dir = controller
+                    .active_capture_dir
+                    .clone()
+                    .or_else(|| {
+                        audio_path
+                            .as_ref()
+                            .map(PathBuf::from)
+                            .and_then(|p| p.parent().map(ToOwned::to_owned))
+                    })
+                    .unwrap_or_else(|| {
+                        app.settings()
+                            .vault_base()
+                            .map(|base| base.join("sessions").join(&session_id).into_std_path_buf())
+                            .unwrap_or_else(|_| PathBuf::from("sessions").join(&session_id))
+                    });
+                let context = StoppedSessionContext {
+                    is_live_test,
+                    live_test_mode,
+                    output_dir,
+                    capture_dir,
+                    settings: controller.settings.clone(),
+                };
 
-                    controller.background_transcription_count =
-                        controller.background_transcription_count.saturating_add(1);
-                    if was_active_session {
-                        controller.phase = RecorderPhase::Idle;
-                        controller.status_detail = if is_live_test {
-                            "Live test: transcribing".to_string()
-                        } else {
-                            "Transcribing in background".to_string()
-                        };
-                        controller.active_session_id = None;
-                        controller.recording_started_at = None;
-                        controller.active_capture_dir = None;
-                        controller.recording_end_reminder.clear();
-                        live_handle = match take_live_transcription_handle(&app) {
-                            Ok(handle) => handle,
-                            Err(error) => {
-                                tracing::warn!("live_transcription_take_failed: {error}");
-                                None
-                            }
-                        };
-                    } else if !controller.has_active_capture() {
-                        controller.phase = RecorderPhase::Idle;
-                        controller.status_detail = if is_live_test {
-                            "Live test: transcribing".to_string()
-                        } else {
-                            "Transcribing in background".to_string()
-                        };
-                    }
-                    let _ = set_controller(&app, controller);
-                    if live_test_mode == Some(live_test_diagnostics::LiveTestMode::Guided) {
-                        emit_audio_check_state(
-                            &app,
-                            audio_check_window::state(
-                                "transcribing",
-                                "Analyzing",
-                                "Transcribing the phrases and checking audio levels.",
-                                0.94,
-                                Some(session_id.clone()),
-                                Some(context.output_dir.to_string_lossy().into_owned()),
-                            ),
-                        );
-                    }
-                    Some(context)
+                controller.background_transcription_count =
+                    controller.background_transcription_count.saturating_add(1);
+                if was_active_session {
+                    controller.phase = RecorderPhase::Idle;
+                    controller.status_detail = if is_live_test {
+                        "Live test: transcribing".to_string()
+                    } else {
+                        "Transcribing in background".to_string()
+                    };
+                    controller.active_session_id = None;
+                    controller.recording_started_at = None;
+                    controller.active_capture_dir = None;
+                    controller.recording_end_reminder.clear();
+                    live_handle = match take_live_transcription_handle(&app) {
+                        Ok(handle) => handle,
+                        Err(error) => {
+                            tracing::warn!("live_transcription_take_failed: {error}");
+                            None
+                        }
+                    };
+                } else if !controller.has_active_capture() {
+                    controller.phase = RecorderPhase::Idle;
+                    controller.status_detail = if is_live_test {
+                        "Live test: transcribing".to_string()
+                    } else {
+                        "Transcribing in background".to_string()
+                    };
                 }
+                if live_test_mode == Some(live_test_diagnostics::LiveTestMode::Guided) {
+                    emit_audio_check_state(
+                        &app,
+                        audio_check_window::state(
+                            "transcribing",
+                            "Analyzing",
+                            "Transcribing the phrases and checking audio levels.",
+                            0.94,
+                            Some(session_id.clone()),
+                            Some(context.output_dir.to_string_lossy().into_owned()),
+                        ),
+                    );
+                }
+                Some(context)
+            }) {
+                Ok(context) => context,
                 Err(error) => {
                     tracing::error!("missing controller while handling stop: {error}");
                     None
@@ -697,15 +807,10 @@ async fn process_stopped_session(
 
     let result =
         tauri::async_runtime::spawn_blocking(move || transcription::process_session(input)).await;
-    let mut controller = match get_controller(&app) {
-        Ok(controller) => controller,
-        Err(error) => {
-            tracing::error!("missing controller after transcription: {error}");
-            return;
-        }
-    };
+    let mut last_transcript_path = None;
+    let mut onboarding_completed = false;
 
-    match result {
+    let (completed_phase, completed_detail) = match result {
         Ok(Ok(artifacts)) => {
             let audio_path = artifacts
                 .audio_output_path
@@ -737,12 +842,12 @@ async fn process_stopped_session(
                     None,
                 ) {
                     Ok(report) if report.passed() => {
-                        controller.last_transcript_path = Some(report.report_markdown_path());
+                        last_transcript_path = Some(report.report_markdown_path());
                         live_test_report = Some(report);
                         None
                     }
                     Ok(report) => {
-                        controller.last_transcript_path = Some(report.report_markdown_path());
+                        last_transcript_path = Some(report.report_markdown_path());
                         let failure = report.failure_summary();
                         live_test_report = Some(report);
                         Some(failure)
@@ -767,13 +872,10 @@ async fn process_stopped_session(
             }
 
             if is_live_test && live_test_failure.is_none() {
-                controller.settings.onboarding_completed = true;
-                if let Err(error) = recorder_settings::save(&app, &controller.settings) {
-                    tracing::warn!("failed saving onboarding completion: {error}");
-                }
+                onboarding_completed = true;
             }
             if !is_live_test {
-                controller.last_transcript_path = Some(artifacts.transcript_markdown_path.clone());
+                last_transcript_path = Some(artifacts.transcript_markdown_path.clone());
             }
             if live_test_mode == Some(live_test_diagnostics::LiveTestMode::Guided) {
                 let title = if live_test_failure.is_some() {
@@ -795,9 +897,7 @@ async fn process_stopped_session(
                     tracing::warn!("audio_check_complete_state_failed: {error}");
                 }
             }
-            finish_background_transcription(
-                &mut controller,
-                &session_id,
+            (
                 if live_test_failure.is_some() {
                     RecorderPhase::Error
                 } else {
@@ -810,7 +910,7 @@ async fn process_stopped_session(
                 } else {
                     "Transcript ready".to_string()
                 },
-            );
+            )
         }
         Ok(Err(error)) => {
             manifest.mark_error(error.clone());
@@ -826,7 +926,7 @@ async fn process_stopped_session(
                     Some(error.clone()),
                 ) {
                     Ok(report) => {
-                        controller.last_transcript_path = Some(report.report_markdown_path());
+                        last_transcript_path = Some(report.report_markdown_path());
                         live_test_report = Some(report);
                     }
                     Err(error) => tracing::warn!("live_test_report_failed: {error}"),
@@ -844,17 +944,15 @@ async fn process_stopped_session(
                 }
             }
             reindex_after_transcription(&settings);
-            finish_background_transcription(
-                &mut controller,
-                &session_id,
+            tracing::error!("transcription_failed: {error}");
+            (
                 RecorderPhase::Error,
                 if is_live_test {
                     "Live test failed".to_string()
                 } else {
                     transcription_error_detail(&error)
                 },
-            );
-            tracing::error!("transcription_failed: {error}");
+            )
         }
         Err(join_error) => {
             let message = format!("transcription task join failed: {join_error}");
@@ -871,7 +969,7 @@ async fn process_stopped_session(
                     Some(message.clone()),
                 ) {
                     Ok(report) => {
-                        controller.last_transcript_path = Some(report.report_markdown_path());
+                        last_transcript_path = Some(report.report_markdown_path());
                         live_test_report = Some(report);
                     }
                     Err(error) => tracing::warn!("live_test_report_failed: {error}"),
@@ -889,22 +987,40 @@ async fn process_stopped_session(
                 }
             }
             reindex_after_transcription(&settings);
-            finish_background_transcription(
-                &mut controller,
-                &session_id,
+            tracing::error!("{message}");
+            (
                 RecorderPhase::Error,
                 if is_live_test {
                     "Live test crashed".to_string()
                 } else {
                     "Transcription task crashed".to_string()
                 },
-            );
-            tracing::error!("{message}");
+            )
         }
+    };
+
+    if onboarding_completed
+        && let Err(error) = update_and_save_settings(&app, |controller| {
+            controller.settings.onboarding_completed = true;
+            Ok(())
+        })
+    {
+        tracing::warn!("failed saving onboarding completion: {error}");
     }
 
-    let should_exit = controller.quit_requested && !controller.has_active_work();
-    let _ = set_controller(&app, controller);
+    let should_exit = match update_controller(&app, |controller| {
+        if let Some(path) = last_transcript_path {
+            controller.last_transcript_path = Some(path);
+        }
+        finish_background_transcription(controller, &session_id, completed_phase, completed_detail);
+        controller.quit_requested && !controller.has_active_work()
+    }) {
+        Ok(should_exit) => should_exit,
+        Err(error) => {
+            tracing::error!("missing controller after transcription: {error}");
+            return;
+        }
+    };
 
     if should_exit {
         app.exit(0);
@@ -1183,22 +1299,71 @@ fn finish_background_transcription(
 }
 
 pub async fn start_recording(app: tauri::AppHandle) -> Result<String, String> {
-    start_recording_inner(app, false, "Capture active").await
+    let session_id = start_recording_inner(app.clone(), false, "Capture active", None).await?;
+    if let Err(error) = meeting_automation_runtime::recording_started(&app) {
+        tracing::warn!(%error, "capture started but meeting automation bookkeeping failed");
+    }
+    Ok(session_id)
 }
 
-async fn start_recording_inner(
+pub(crate) async fn start_recording_for_meeting(
     app: tauri::AppHandle,
-    onboarding: bool,
+    _evidence: MeetingEvidence,
     status_detail: &str,
+    required_mode: AutomationMode,
 ) -> Result<String, String> {
-    let mut controller = get_controller(&app)?;
+    let session_id =
+        start_recording_inner(app.clone(), false, status_detail, Some(required_mode)).await?;
+    if let Err(error) = meeting_automation_runtime::recording_started(&app) {
+        tracing::warn!(%error, "capture started but meeting automation bookkeeping failed");
+    }
+    Ok(session_id)
+}
+
+fn reserve_recording_start(
+    controller: &mut AppController,
+    session_id: &str,
+    capture_dir: &Path,
+    status_detail: &str,
+    required_automation_mode: Option<AutomationMode>,
+) -> Result<(RecorderSettings, PathBuf, Option<String>), String> {
+    if controller.quit_requested {
+        return Err("cannot start while quit is queued".to_string());
+    }
     if !controller.can_start_recording() {
         return Err(format!(
             "cannot start while status is {}",
             controller.phase.status_text()
         ));
     }
+    if let Some(required_mode) = required_automation_mode
+        && controller.settings.meeting_automation_mode != required_mode
+    {
+        return Err("meeting automation mode changed before recording started".to_string());
+    }
 
+    let settings = controller.settings.clone();
+    let output_dir = settings.recordings_dir_path().join(session_id);
+    let mic_device_id = settings.mic_device_id.clone();
+    controller.phase = RecorderPhase::Recording;
+    controller.status_detail = status_detail.to_string();
+    controller.active_session_id = Some(session_id.to_string());
+    controller.recording_started_at = Some(std::time::Instant::now());
+    controller.active_capture_dir = Some(capture_dir.to_path_buf());
+    controller
+        .recording_end_reminder
+        .reset_for_recording(std::time::Instant::now());
+    Ok((settings, output_dir, mic_device_id))
+}
+
+async fn start_recording_inner(
+    app: tauri::AppHandle,
+    onboarding: bool,
+    status_detail: &str,
+    required_automation_mode: Option<AutomationMode>,
+) -> Result<String, String> {
+    let state = app.state::<AppState>();
+    let _capture_transition = state.capture_transition.lock().await;
     let session_id = uuid::Uuid::new_v4().to_string();
     let vault_base = app
         .settings()
@@ -1208,36 +1373,36 @@ async fn start_recording_inner(
         .join("sessions")
         .join(&session_id)
         .into_std_path_buf();
-    let output_dir = controller.settings.recordings_dir_path().join(&session_id);
-    let settings = controller.settings.clone();
-    let mic_device_name =
-        selected_microphone_name(&app, controller.settings.mic_device_id.as_deref());
-
-    if let Some(mic_device_id) = controller.settings.mic_device_id.clone() {
-        app.audio_priority()
-            .set_default_input_device(&mic_device_id)
-            .map_err(|e| format!("failed setting microphone {mic_device_id}: {e}"))?;
-    }
-
-    manifest::write_manifest(
-        &output_dir,
-        &manifest::SessionManifest::recording(
-            session_id.clone(),
-            capture_dir.to_string_lossy().into_owned(),
-        ),
-    )?;
-
-    controller.phase = RecorderPhase::Recording;
-    controller.status_detail = status_detail.to_string();
-    controller.quit_requested = false;
-    controller.active_session_id = Some(session_id.clone());
-    controller.recording_started_at = Some(std::time::Instant::now());
-    controller.active_capture_dir = Some(capture_dir.clone());
-    controller
-        .recording_end_reminder
-        .reset_for_recording(std::time::Instant::now());
-    set_controller(&app, controller)?;
+    let (settings, output_dir, mic_device_id) = update_controller(&app, |controller| {
+        reserve_recording_start(
+            controller,
+            &session_id,
+            &capture_dir,
+            status_detail,
+            required_automation_mode,
+        )
+    })??;
     refresh_tray(&app);
+
+    let mic_device_name = selected_microphone_name(&app, mic_device_id.as_deref());
+    let prepare_result = (|| -> Result<(), String> {
+        if let Some(mic_device_id) = mic_device_id {
+            app.audio_priority()
+                .set_default_input_device(&mic_device_id)
+                .map_err(|e| format!("failed setting microphone {mic_device_id}: {e}"))?;
+        }
+        manifest::write_manifest(
+            &output_dir,
+            &manifest::SessionManifest::recording(
+                session_id.clone(),
+                capture_dir.to_string_lossy().into_owned(),
+            ),
+        )
+    })();
+    if let Err(error) = prepare_result {
+        rollback_recording_start(&app, &session_id, "Failed to prepare recording")?;
+        return Err(error);
+    }
 
     let params = CaptureParams {
         session_id: session_id.clone(),
@@ -1257,19 +1422,11 @@ async fn start_recording_inner(
     };
 
     if let Err(error) = app.listener().start_capture(params).await {
-        let mut controller = get_controller(&app)?;
-        controller.phase = RecorderPhase::Error;
-        controller.status_detail = "Failed to start capture".to_string();
-        controller.active_session_id = None;
-        controller.recording_started_at = None;
-        controller.active_capture_dir = None;
-        controller.recording_end_reminder.clear();
-        set_controller(&app, controller)?;
+        rollback_recording_start(&app, &session_id, "Failed to start capture")?;
         if let Ok(mut manifest) = manifest::read_manifest(&output_dir) {
             manifest.mark_error(error.to_string());
             let _ = manifest::write_manifest(&output_dir, &manifest);
         }
-        refresh_tray(&app);
         return Err(error.to_string());
     }
 
@@ -1285,6 +1442,29 @@ async fn start_recording_inner(
     )?;
 
     Ok(session_id)
+}
+
+fn rollback_recording_start(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    detail: &str,
+) -> Result<(), String> {
+    let rolled_back = update_controller(app, |controller| {
+        if controller.active_session_id.as_deref() != Some(session_id) {
+            return false;
+        }
+        controller.phase = RecorderPhase::Error;
+        controller.status_detail = detail.to_string();
+        controller.active_session_id = None;
+        controller.recording_started_at = None;
+        controller.active_capture_dir = None;
+        controller.recording_end_reminder.clear();
+        true
+    })?;
+    if rolled_back {
+        refresh_tray(app);
+    }
+    Ok(())
 }
 
 fn selected_microphone_name(app: &tauri::AppHandle, mic_device_id: Option<&str>) -> Option<String> {
@@ -1375,27 +1555,31 @@ async fn run_live_test_with_mode(
         return Err("system audio permission missing".to_string());
     }
 
-    let session_id = start_recording_inner(app.clone(), false, "Live test: starting").await?;
-    let mut controller = get_controller(&app)?;
-    let capture_dir = controller
-        .active_capture_dir
-        .clone()
-        .ok_or_else(|| "live test capture dir missing".to_string())?;
-    let output_dir = controller.settings.recordings_dir_path().join(&session_id);
-    controller.live_test_session_id = Some(session_id.clone());
-    controller.live_test_mode = Some(mode);
-    controller.status_detail = match mode {
-        live_test_diagnostics::LiveTestMode::Automatic => {
-            "Live test: playing diagnostic audio".to_string()
+    let session_id = start_recording_inner(app.clone(), false, "Live test: starting", None).await?;
+    let (capture_dir, output_dir) = update_controller(&app, |controller| {
+        if controller.active_session_id.as_deref() != Some(session_id.as_str()) {
+            return Err("live test session changed before setup completed".to_string());
         }
-        live_test_diagnostics::LiveTestMode::Guided => {
-            format!(
-                "Audio check: say '{}'",
-                live_test_diagnostics::GUIDED_MIC_PHRASE
-            )
-        }
-    };
-    set_controller(&app, controller)?;
+        let capture_dir = controller
+            .active_capture_dir
+            .clone()
+            .ok_or_else(|| "live test capture dir missing".to_string())?;
+        let output_dir = controller.settings.recordings_dir_path().join(&session_id);
+        controller.live_test_session_id = Some(session_id.clone());
+        controller.live_test_mode = Some(mode);
+        controller.status_detail = match mode {
+            live_test_diagnostics::LiveTestMode::Automatic => {
+                "Live test: playing diagnostic audio".to_string()
+            }
+            live_test_diagnostics::LiveTestMode::Guided => {
+                format!(
+                    "Audio check: say '{}'",
+                    live_test_diagnostics::GUIDED_MIC_PHRASE
+                )
+            }
+        };
+        Ok((capture_dir, output_dir))
+    })??;
     refresh_tray(&app);
 
     if guided {
@@ -1431,10 +1615,10 @@ fn write_live_test_permission_report(
         microphone_permission,
         system_audio_permission,
     )?;
-    let mut controller = controller.clone();
-    controller.last_transcript_path = Some(report.report_markdown_path());
-    controller.status_detail = format!("Live test failed: {}", report.failure_summary());
-    set_controller(app, controller)?;
+    update_controller(app, |current| {
+        current.last_transcript_path = Some(report.report_markdown_path());
+        current.status_detail = format!("Live test failed: {}", report.failure_summary());
+    })?;
     refresh_tray(app);
     Ok(report)
 }
@@ -1681,24 +1865,38 @@ pub(crate) async fn stop_recording_inner(
     app: tauri::AppHandle,
     reason: StopRecordingReason,
 ) -> Result<(), String> {
-    let mut controller = get_controller(&app)?;
-    if !controller.can_stop_recording() {
-        return Err(format!(
-            "cannot stop while status is {}",
-            controller.phase.status_text()
-        ));
-    }
+    let state = app.state::<AppState>();
+    let _capture_transition = state.capture_transition.lock().await;
+    stop_recording_locked(app.clone(), reason).await
+}
 
-    controller.phase = RecorderPhase::Finalizing;
-    controller.status_detail =
-        if controller.live_test_session_id.as_deref() == controller.active_session_id.as_deref() {
+async fn stop_recording_locked(
+    app: tauri::AppHandle,
+    reason: StopRecordingReason,
+) -> Result<(), String> {
+    update_controller(&app, |controller| {
+        if !controller.can_stop_recording() {
+            return Err(format!(
+                "cannot stop while status is {}",
+                controller.phase.status_text()
+            ));
+        }
+
+        controller.phase = RecorderPhase::Finalizing;
+        controller.status_detail = if controller.live_test_session_id.as_deref()
+            == controller.active_session_id.as_deref()
+        {
             "Live test: stopping".to_string()
         } else if reason == StopRecordingReason::AutoQuiet {
             "Auto-stopping after quiet period".to_string()
         } else {
             "Stopping capture".to_string()
         };
-    set_controller(&app, controller)?;
+        Ok(())
+    })??;
+    if let Err(error) = meeting_automation_runtime::recording_stopping(&app) {
+        tracing::warn!(%error, "capture is stopping but meeting automation bookkeeping failed");
+    }
     refresh_tray(&app);
 
     app.listener().stop_capture().await;
@@ -1784,12 +1982,12 @@ pub fn set_recordings_folder(app: tauri::AppHandle, path: String) -> Result<(), 
     std::fs::create_dir_all(&target)
         .map_err(|e| format!("failed creating recordings dir {}: {e}", target.display()))?;
 
-    let mut controller = get_controller(&app)?;
-    controller.settings.recordings_dir = target.to_string_lossy().into_owned();
-    recorder_settings::save(&app, &controller.settings)?;
-    controller.last_transcript_path =
-        recorder_settings::latest_transcript_path(&controller.settings.recordings_dir_path());
-    set_controller(&app, controller)?;
+    update_and_save_settings(&app, |controller| {
+        controller.settings.recordings_dir = target.to_string_lossy().into_owned();
+        controller.last_transcript_path =
+            recorder_settings::latest_transcript_path(&controller.settings.recordings_dir_path());
+        Ok(())
+    })?;
     refresh_tray(&app);
     Ok(())
 }
@@ -1799,27 +1997,27 @@ pub fn set_microphone_device(app: tauri::AppHandle, device_id: String) -> Result
         .set_default_input_device(&device_id)
         .map_err(|e| format!("failed setting microphone device {device_id}: {e}"))?;
 
-    let mut controller = get_controller(&app)?;
-    controller.settings.mic_device_id = Some(device_id);
-    recorder_settings::save(&app, &controller.settings)?;
-    set_controller(&app, controller)?;
+    update_and_save_settings(&app, |controller| {
+        controller.settings.mic_device_id = Some(device_id);
+        Ok(())
+    })?;
     refresh_tray(&app);
     Ok(())
 }
 
 pub fn set_speaker_label_mode(app: tauri::AppHandle, mode: SpeakerLabelMode) -> Result<(), String> {
-    let mut controller = get_controller(&app)?;
-    if controller.has_active_capture() {
-        return Err(format!(
-            "cannot change speaker labels while status is {}",
-            controller.phase.status_text()
-        ));
-    }
+    update_and_save_settings(&app, |controller| {
+        if controller.has_active_capture() {
+            return Err(format!(
+                "cannot change speaker labels while status is {}",
+                controller.phase.status_text()
+            ));
+        }
 
-    controller.settings.speaker_label_mode = mode;
-    controller.status_detail = format!("Speaker labels: {}", mode.menu_label());
-    recorder_settings::save(&app, &controller.settings)?;
-    set_controller(&app, controller)?;
+        controller.settings.speaker_label_mode = mode;
+        controller.status_detail = format!("Speaker labels: {}", mode.menu_label());
+        Ok(())
+    })?;
     refresh_tray(&app);
     Ok(())
 }
@@ -1835,6 +2033,27 @@ pub fn set_meeting_end_reminders_enabled(
     recording_end_reminder_runtime::set_enabled(app, enabled)
 }
 
+pub fn set_meeting_automation_mode(
+    app: tauri::AppHandle,
+    mode: AutomationMode,
+) -> Result<(), String> {
+    update_and_save_settings(&app, |controller| {
+        controller.settings.meeting_automation_mode = mode;
+        controller.status_detail = match mode {
+            AutomationMode::Off => "Meeting detection off",
+            AutomationMode::Ask => "Meeting detection will ask before recording",
+            AutomationMode::CalendarAssisted => {
+                "Calendar-aware meeting detection will ask before recording"
+            }
+        }
+        .to_string();
+        Ok(())
+    })?;
+    meeting_automation_runtime::set_mode(&app, mode)?;
+    refresh_tray(&app);
+    Ok(())
+}
+
 pub(crate) fn get_controller(app: &tauri::AppHandle) -> Result<AppController, String> {
     let state = app.state::<AppState>();
     let guard = state
@@ -1846,15 +2065,15 @@ pub(crate) fn get_controller(app: &tauri::AppHandle) -> Result<AppController, St
         .ok_or_else(|| "controller not initialized".to_string())
 }
 
-pub(crate) fn set_controller(
-    app: &tauri::AppHandle,
-    controller: AppController,
-) -> Result<(), String> {
+fn initialize_controller(app: &tauri::AppHandle, controller: AppController) -> Result<(), String> {
     let state = app.state::<AppState>();
     let mut guard = state
         .controller
         .lock()
         .map_err(|_| "controller lock poisoned".to_string())?;
+    if guard.is_some() {
+        return Err("controller already initialized".to_string());
+    }
     *guard = Some(controller);
     Ok(())
 }
@@ -1872,6 +2091,48 @@ pub(crate) fn update_controller<T>(
         .as_mut()
         .ok_or_else(|| "controller not initialized".to_string())?;
     Ok(update(controller))
+}
+
+fn apply_controller_transaction<T>(
+    controller: &mut AppController,
+    update: impl FnOnce(&mut AppController) -> Result<(T, bool), String>,
+    persist: impl FnOnce(&RecorderSettings) -> Result<(), String>,
+) -> Result<T, String> {
+    let mut candidate = controller.clone();
+    let (value, should_save) = update(&mut candidate)?;
+    if should_save {
+        persist(&candidate.settings)?;
+    }
+    *controller = candidate;
+    Ok(value)
+}
+
+pub(crate) fn update_and_save_settings<T>(
+    app: &tauri::AppHandle,
+    update: impl FnOnce(&mut AppController) -> Result<T, String>,
+) -> Result<T, String> {
+    update_and_maybe_save_settings(app, |controller| Ok((update(controller)?, true)))
+}
+
+pub(crate) fn update_and_maybe_save_settings<T>(
+    app: &tauri::AppHandle,
+    update: impl FnOnce(&mut AppController) -> Result<(T, bool), String>,
+) -> Result<T, String> {
+    let state = app.state::<AppState>();
+    let _persistence_guard = state
+        .settings_persistence
+        .lock()
+        .map_err(|_| "settings persistence lock poisoned".to_string())?;
+    let mut controller_guard = state
+        .controller
+        .lock()
+        .map_err(|_| "controller lock poisoned".to_string())?;
+    let controller = controller_guard
+        .as_mut()
+        .ok_or_else(|| "controller not initialized".to_string())?;
+    apply_controller_transaction(controller, update, |settings| {
+        recorder_settings::save(app, settings)
+    })
 }
 
 fn set_live_transcription_handle(
@@ -1899,9 +2160,9 @@ fn take_live_transcription_handle(
 }
 
 fn set_status_detail(app: &tauri::AppHandle, detail: &str) -> Result<(), String> {
-    let mut controller = get_controller(app)?;
-    controller.status_detail = detail.to_string();
-    set_controller(app, controller)?;
+    update_controller(app, |controller| {
+        controller.status_detail = detail.to_string();
+    })?;
     refresh_tray(app);
     Ok(())
 }
@@ -1939,6 +2200,7 @@ async fn refresh_permission_statuses(app: tauri::AppHandle, probe_system_audio: 
         initial_controller.settings.system_audio_authorized_hint,
     )
     .await;
+    let calendar = meeting_automation_runtime::calendar_permission_state();
 
     if probe_system_audio {
         tracing::info!(
@@ -1949,43 +2211,54 @@ async fn refresh_permission_statuses(app: tauri::AppHandle, probe_system_audio: 
         );
     }
 
-    let mut controller = match get_controller(&app) {
-        Ok(controller) => controller,
+    let update = update_and_maybe_save_settings(&app, |controller| {
+        let mut changed = false;
+        let mut settings_changed = false;
+        if let Some(next_hint) = system_audio_hint
+            && next_hint != controller.settings.system_audio_authorized_hint
+        {
+            controller.settings.system_audio_authorized_hint = next_hint;
+            changed = true;
+            settings_changed = true;
+        }
+
+        let calendar_permission_changed = controller.permission_snapshot.calendar != calendar;
+        let permission_changed = controller.permission_snapshot.microphone != microphone
+            || controller.permission_snapshot.system_audio != system_audio
+            || calendar_permission_changed;
+        if permission_changed {
+            controller.permission_snapshot.microphone = microphone;
+            controller.permission_snapshot.system_audio = system_audio;
+            controller.permission_snapshot.calendar = calendar;
+            changed = true;
+        }
+        Ok((
+            (changed, permission_changed, calendar_permission_changed),
+            settings_changed,
+        ))
+    });
+    let (changed, permission_changed, calendar_permission_changed) = match update {
+        Ok(update) => update,
         Err(error) => {
-            tracing::error!("permissions refresh: latest controller unavailable: {error}");
+            tracing::error!("permissions refresh: failed updating controller: {error}");
             return;
         }
     };
-    let mut changed = false;
 
-    if let Some(next_hint) = system_audio_hint
-        && next_hint != controller.settings.system_audio_authorized_hint
-    {
-        controller.settings.system_audio_authorized_hint = next_hint;
-        changed = true;
-        if let Err(error) = recorder_settings::save(&app, &controller.settings) {
-            tracing::warn!("permissions refresh: failed persisting system audio hint: {error}");
+    if permission_changed {
+        if let Err(error) =
+            meeting_automation_runtime::permissions_changed(&app, calendar_permission_changed)
+        {
+            tracing::debug!(%error, "failed resetting meeting detector after permission change");
         }
-    }
-
-    let was_same = controller.permission_snapshot.microphone == microphone
-        && controller.permission_snapshot.system_audio == system_audio;
-    if was_same {
-        if !changed {
-            return;
-        }
-    } else {
         tracing::info!(
             microphone = ?microphone,
             system_audio = ?system_audio,
+            calendar = ?calendar,
             "permissions_snapshot_updated"
         );
-        controller.permission_snapshot.microphone = microphone;
-        controller.permission_snapshot.system_audio = system_audio;
     }
-
-    if let Err(error) = set_controller(&app, controller) {
-        tracing::error!("permissions refresh: failed to store state: {error}");
+    if !changed {
         return;
     }
     refresh_tray(&app);
@@ -2139,10 +2412,12 @@ mod tests {
     use std::time::Instant;
 
     use super::{
-        canonical_existing_path, finish_background_transcription,
-        resolve_microphone_permission_state, transcription_error_detail,
+        apply_controller_transaction, canonical_existing_path, finish_background_transcription,
+        mark_quit_requested, reserve_recording_start, resolve_microphone_permission_state,
+        transcription_error_detail,
     };
     use crate::controller::{AppController, PermissionState, RecorderPhase};
+    use crate::meeting_detection::AutomationMode;
     use crate::recorder_settings::RecorderSettings;
     use tempfile::tempdir;
 
@@ -2194,6 +2469,56 @@ mod tests {
 
         assert!(inside.starts_with(&recordings));
         assert!(!outside.starts_with(&recordings));
+    }
+
+    #[test]
+    fn settings_save_failure_leaves_live_controller_unchanged() {
+        let mut controller = AppController::new(
+            RecorderSettings::default_with_recordings_dir(PathBuf::from("/tmp/poha-tests")),
+            None,
+        );
+        controller.status_detail = "Meeting detection off".to_string();
+
+        let result = apply_controller_transaction(
+            &mut controller,
+            |candidate| {
+                candidate.settings.meeting_automation_mode = AutomationMode::CalendarAssisted;
+                candidate.settings.calendar_integration_enabled = true;
+                candidate.status_detail = "Calendar-aware confirmation enabled".to_string();
+                Ok(((), true))
+            },
+            |_| Err("simulated settings write failure".to_string()),
+        );
+
+        assert_eq!(result, Err("simulated settings write failure".to_string()));
+        assert_eq!(
+            controller.settings.meeting_automation_mode,
+            AutomationMode::Off
+        );
+        assert!(!controller.settings.calendar_integration_enabled);
+        assert_eq!(controller.status_detail, "Meeting detection off");
+    }
+
+    #[test]
+    fn idle_quit_is_marked_before_any_future_recording_start() {
+        let mut controller = AppController::new(
+            RecorderSettings::default_with_recordings_dir(PathBuf::from("/tmp/poha-tests")),
+            None,
+        );
+        assert!(!mark_quit_requested(&mut controller, "Quitting"));
+        let result = reserve_recording_start(
+            &mut controller,
+            "new-recording",
+            std::path::Path::new("/tmp/new-recording"),
+            "Capture active",
+            None,
+        );
+
+        assert_eq!(result.unwrap_err(), "cannot start while quit is queued");
+        assert!(controller.quit_requested);
+        assert_eq!(controller.phase, RecorderPhase::Idle);
+        assert!(controller.active_session_id.is_none());
+        assert!(controller.active_capture_dir.is_none());
     }
 
     #[test]

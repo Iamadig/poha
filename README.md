@@ -17,6 +17,7 @@ Poha is for breakfast. It is also for founders who want meeting notes without an
 - Runs guided audio diagnostics for mic, system audio, timing, and transcript checks.
 - Keeps storage tidy by moving safe-to-clean artifacts to macOS Trash, not hard-deleting them.
 - Exposes `poha-cli` for stable JSON reads and constrained agent-safe writes.
+- Offers opt-in meeting detection; it is Off by default and treats browser activity as prompt-only evidence.
 - Can invoke Codex for bulk enrichment of missing or stale meeting summaries.
 - Defaults local: recording and transcription run on your Mac; no analytics are included.
 
@@ -67,6 +68,14 @@ poha-cli diagnostics audio --guided
 
 Agent-safe writes are limited to `summary.md`, `meeting.json`, `.poha/meetings.sqlite`, and `.poha/exports`. Poha does not let the CLI rewrite audio, `session.json`, or transcript evidence.
 
+You are responsible for obtaining any participant consent and complying with recording laws and organizational policies before starting capture.
+
+## Meeting Detection
+
+Meeting detection is opt-in and defaults to **Off**. **Ask Before Recording** displays a consent prompt after stable meeting evidence. **Ask With Calendar Context** adds a fresh, sanitized calendar occurrence to that confirmation flow when one is available. Native activity, weaker power-only signals, unscheduled calls, and all browser activity always require an explicit prompt; calendar provider and time alone never authorize recording.
+
+Calendar matching is separately opt-in and opens the visible macOS EventKit full-access permission sheet. Poha queries only a fixed near-current time window. It immediately reduces recognized Zoom, Teams, Meet, or Webex events to provider, start/end times, and a one-way occurrence hash. Titles, attendees, notes, organizers, locations, and raw meeting URLs are not retained or passed into Poha's occurrence model.
+
 ## Codex Integration
 
 Poha can ask Codex to enrich meetings that need summaries. The app finds missing or stale summaries, invokes the local `codex` CLI, lets Codex read transcripts from the recordings directory, and writes the result back through `poha-cli`.
@@ -116,6 +125,8 @@ pnpm poha:build
 ## Privacy
 
 Poha records and transcribes locally. The standalone app does not include analytics or remote crash reporting.
+
+Native meeting detection uses stable application identities and coarse audio/power activity, never window titles, screen pixels, or meeting content. Calendar matching retains only provider, time range, and a hashed occurrence identifier after recognizing a supported meeting link.
 
 Codex enrichment is optional and uses the local `codex` CLI. Treat it as external AI processing according to your Codex account and backend settings.
 
