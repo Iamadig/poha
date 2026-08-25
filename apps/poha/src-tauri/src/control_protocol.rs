@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 pub const CONTROL_PROTOCOL_VERSION: u32 = 1;
 pub const MAX_JSON_LINE_BYTES: usize = 64 * 1024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
-const MAX_IDEMPOTENCY_KEY_BYTES: usize = 256;
+pub const MAX_IDEMPOTENCY_KEY_BYTES: usize = 256;
 const MAX_SESSION_ID_BYTES: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,8 +40,16 @@ impl ControlRequest {
 #[serde(tag = "command", rename_all = "camelCase", deny_unknown_fields)]
 pub enum ControlCommand {
     Status,
-    Start { idempotency_key: String },
-    Stop { target: StopTarget },
+    Start {
+        idempotency_key: String,
+    },
+    Stop {
+        target: StopTarget,
+        idempotency_key: String,
+    },
+    StopRetry {
+        idempotency_key: String,
+    },
 }
 
 impl ControlCommand {
@@ -54,7 +62,24 @@ impl ControlCommand {
                 MAX_IDEMPOTENCY_KEY_BYTES,
                 ControlErrorCode::InvalidRequest,
             ),
-            Self::Stop { target } => target.validate(),
+            Self::Stop {
+                target,
+                idempotency_key,
+            } => {
+                validate_nonempty_bounded(
+                    "idempotencyKey",
+                    idempotency_key,
+                    MAX_IDEMPOTENCY_KEY_BYTES,
+                    ControlErrorCode::InvalidRequest,
+                )?;
+                target.validate()
+            }
+            Self::StopRetry { idempotency_key } => validate_nonempty_bounded(
+                "idempotencyKey",
+                idempotency_key,
+                MAX_IDEMPOTENCY_KEY_BYTES,
+                ControlErrorCode::InvalidRequest,
+            ),
         }
     }
 }
@@ -62,20 +87,25 @@ impl ControlCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum StopTarget {
-    Current,
+    Current { observed_session_id: Option<String> },
     Session { session_id: String },
 }
 
 impl StopTarget {
     fn validate(&self) -> Result<(), ControlError> {
         match self {
-            Self::Current => Ok(()),
-            Self::Session { session_id } => validate_nonempty_bounded(
+            Self::Current {
+                observed_session_id: Some(session_id),
+            }
+            | Self::Session { session_id } => validate_nonempty_bounded(
                 "sessionId",
                 session_id,
                 MAX_SESSION_ID_BYTES,
                 ControlErrorCode::InvalidRequest,
             ),
+            Self::Current {
+                observed_session_id: None,
+            } => Ok(()),
         }
     }
 }
@@ -124,11 +154,22 @@ pub struct ControlResult {
     pub action: ControlAction,
     #[serde(flatten)]
     pub state: RecordingState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_session_id: Option<String>,
 }
 
 impl ControlResult {
     pub fn new(action: ControlAction, state: RecordingState) -> Self {
-        Self { action, state }
+        Self {
+            action,
+            state,
+            operation_session_id: None,
+        }
+    }
+
+    pub fn with_operation_session_id(mut self, session_id: Option<String>) -> Self {
+        self.operation_session_id = session_id;
+        self
     }
 }
 
@@ -152,6 +193,8 @@ pub struct ControlError {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<RecordingState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_session_id: Option<String>,
 }
 
 impl ControlError {
@@ -160,11 +203,17 @@ impl ControlError {
             code,
             message: message.into(),
             state: None,
+            operation_session_id: None,
         }
     }
 
     pub fn with_state(mut self, state: RecordingState) -> Self {
         self.state = Some(state);
+        self
+    }
+
+    pub fn with_operation_session_id(mut self, session_id: Option<String>) -> Self {
+        self.operation_session_id = session_id;
         self
     }
 }
@@ -270,10 +319,36 @@ mod tests {
             target: StopTarget::Session {
                 session_id: String::new(),
             },
+            idempotency_key: "stop-1".to_string(),
         };
 
         let error = command.validate().expect_err("invalid command");
         assert_eq!(error.code, ControlErrorCode::InvalidRequest);
         assert!(error.message.contains("sessionId"));
+    }
+
+    #[test]
+    fn stop_requires_nonempty_idempotency_key() {
+        let command = ControlCommand::Stop {
+            target: StopTarget::Current {
+                observed_session_id: None,
+            },
+            idempotency_key: " ".to_string(),
+        };
+
+        let error = command.validate().expect_err("invalid command");
+        assert_eq!(error.code, ControlErrorCode::InvalidRequest);
+        assert!(error.message.contains("idempotencyKey"));
+    }
+
+    #[test]
+    fn stop_retry_requires_nonempty_idempotency_key() {
+        let command = ControlCommand::StopRetry {
+            idempotency_key: String::new(),
+        };
+
+        let error = command.validate().expect_err("invalid command");
+        assert_eq!(error.code, ControlErrorCode::InvalidRequest);
+        assert!(error.message.contains("idempotencyKey"));
     }
 }

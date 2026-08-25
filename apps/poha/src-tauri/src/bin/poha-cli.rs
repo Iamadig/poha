@@ -122,10 +122,31 @@ struct RecordingStartArgs {
 
 #[derive(Args)]
 struct RecordingStopArgs {
-    #[arg(long, conflicts_with = "current", required_unless_present = "current")]
+    #[arg(
+        long,
+        conflicts_with_all = ["current", "retry"],
+        required_unless_present_any = ["current", "retry"]
+    )]
     session: Option<String>,
-    #[arg(long, conflicts_with = "session", required_unless_present = "session")]
+    #[arg(
+        long,
+        conflicts_with_all = ["session", "retry"],
+        required_unless_present_any = ["session", "retry"]
+    )]
     current: bool,
+    #[arg(
+        long,
+        conflicts_with_all = ["session", "current", "idempotency_key"],
+        required_unless_present_any = ["session", "current"],
+        help = "Replay a previously dispatched stop by key without targeting a current session."
+    )]
+    retry: Option<String>,
+    #[arg(
+        long,
+        conflicts_with = "retry",
+        help = "Stable retry key. A random UUID is generated when this is omitted."
+    )]
+    idempotency_key: Option<String>,
 }
 
 #[derive(Args)]
@@ -301,6 +322,7 @@ struct ExportArgs {
 struct CliError {
     code: &'static str,
     message: String,
+    idempotency_key: Option<String>,
 }
 
 #[derive(Clone)]
@@ -407,6 +429,11 @@ struct RecordingControlOutput {
     result: ControlResult,
     #[serde(skip_serializing_if = "Option::is_none")]
     idempotency_key: Option<String>,
+}
+
+enum RecordingControlIntent {
+    Direct(ControlCommand),
+    StopCurrent,
 }
 
 fn main() {
@@ -923,31 +950,55 @@ fn run_recording_command(
     ctx: &Context,
     control_dir: Option<&Path>,
 ) -> Result<(), CliError> {
-    let (operation, idempotency_key) = match command {
-        RecordingCommand::Status => (ControlCommand::Status, None),
+    let (intent, mut idempotency_key) = match command {
+        RecordingCommand::Status => (RecordingControlIntent::Direct(ControlCommand::Status), None),
         RecordingCommand::Start(args) => {
             let key = args
                 .idempotency_key
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             (
-                ControlCommand::Start {
+                RecordingControlIntent::Direct(ControlCommand::Start {
                     idempotency_key: key.clone(),
-                },
+                }),
                 Some(key),
             )
         }
         RecordingCommand::Stop(args) => {
-            let target = match args.session {
-                Some(session_id) => StopTarget::Session { session_id },
-                None if args.current => StopTarget::Current,
-                None => {
+            if let Some(retry_key) = args.retry {
+                (
+                    RecordingControlIntent::Direct(ControlCommand::StopRetry {
+                        idempotency_key: retry_key.clone(),
+                    }),
+                    Some(retry_key),
+                )
+            } else if let Some(session_id) = args.session {
+                let key = args
+                    .idempotency_key
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                (
+                    RecordingControlIntent::Direct(ControlCommand::Stop {
+                        target: StopTarget::Session { session_id },
+                        idempotency_key: key.clone(),
+                    }),
+                    Some(key),
+                )
+            } else if args.current {
+                if let Some(key) = args.idempotency_key {
                     return Err(CliError::new(
                         "controlInvalidRequest",
-                        "recording stop requires --current or --session <id>".to_string(),
-                    ));
+                        "--current creates a new session-bound stop and cannot accept --idempotency-key; use --retry <key> after an uncertain dispatch"
+                            .to_string(),
+                    )
+                    .with_idempotency_key(Some(key)));
                 }
-            };
-            (ControlCommand::Stop { target }, None)
+                (RecordingControlIntent::StopCurrent, None)
+            } else {
+                return Err(CliError::new(
+                    "controlInvalidRequest",
+                    "recording stop requires --current, --session <id>, or --retry <key>"
+                        .to_string(),
+                ));
+            }
         }
     };
 
@@ -958,13 +1009,32 @@ fn run_recording_command(
                 "controlUnavailable",
                 format!("failed resolving control directory: {error}"),
             )
+            .with_idempotency_key(idempotency_key.clone())
         })?,
     };
-    let client = ControlClient::discover(paths)
-        .map_err(|error| CliError::new(error.code(), error.to_string()))?;
-    let result = client
-        .call(operation)
-        .map_err(|error| CliError::new(error.code(), error.to_string()))?;
+    let client = ControlClient::discover(paths).map_err(|error| {
+        CliError::new(error.code(), error.to_string()).with_idempotency_key(idempotency_key.clone())
+    })?;
+    let operation = match intent {
+        RecordingControlIntent::Direct(operation) => operation,
+        RecordingControlIntent::StopCurrent => {
+            let observed = client.call(ControlCommand::Status).map_err(|error| {
+                CliError::new(error.code(), error.to_string())
+                    .with_idempotency_key(idempotency_key.clone())
+            })?;
+            let key = uuid::Uuid::new_v4().to_string();
+            idempotency_key = Some(key.clone());
+            ControlCommand::Stop {
+                target: StopTarget::Current {
+                    observed_session_id: observed.state.active_session_id,
+                },
+                idempotency_key: key,
+            }
+        }
+    };
+    let result = client.call(operation).map_err(|error| {
+        CliError::new(error.code(), error.to_string()).with_idempotency_key(idempotency_key.clone())
+    })?;
     emit_success(
         command_name,
         RecordingControlOutput {
@@ -1432,7 +1502,8 @@ fn spec() -> Value {
                 "stateful": true,
                 "captureSources": ["microphone", "systemAudio"],
                 "finalizesEvidence": ["audio files", "session.json"],
-                "requiresOneOf": ["--current", "--session <id>"]
+                "requiresOneOf": ["--current", "--session <id>", "--retry <key>"],
+                "options": ["--idempotency-key (with --session)"]
             }
         },
         "safety": {
@@ -1485,7 +1556,8 @@ fn capabilities() -> Value {
             },
             "recording.stop": {
                 "effect": "stops and finalizes microphone and system-audio capture",
-                "target": "requires --current or --session <id>"
+                "target": "requires --current, --session <id>, or side-effect-free --retry <key>",
+                "idempotencyKey": "accepted with --session or generated by the CLI; --current observes and binds a session before dispatch and must be retried with --retry"
             }
         },
         "writeCommands": {
@@ -1537,7 +1609,16 @@ fn path_string(path: &Path) -> String {
 
 impl CliError {
     fn new(code: &'static str, message: String) -> Self {
-        Self { code, message }
+        Self {
+            code,
+            message,
+            idempotency_key: None,
+        }
+    }
+
+    fn with_idempotency_key(mut self, idempotency_key: Option<String>) -> Self {
+        self.idempotency_key = idempotency_key;
+        self
     }
 }
 
@@ -1704,6 +1785,16 @@ mod tests {
             }
         ));
 
+        let retryable =
+            Cli::try_parse_from(["poha-cli", "recording", "stop", "--retry", "stop-key"])
+                .expect("parse stop retry");
+        assert!(matches!(
+            retryable.command,
+            Command::Recording {
+                command: RecordingCommand::Stop(RecordingStopArgs { retry: Some(_), .. })
+            }
+        ));
+
         let session =
             Cli::try_parse_from(["poha-cli", "recording", "stop", "--session", "session-1"])
                 .expect("parse session stop");
@@ -1716,6 +1807,26 @@ mod tests {
                 })
             }
         ));
+    }
+
+    #[test]
+    fn recording_current_rejects_reusing_an_explicit_key() {
+        let error = run_recording_command(
+            "recording.stop",
+            RecordingCommand::Stop(RecordingStopArgs {
+                session: None,
+                current: true,
+                retry: None,
+                idempotency_key: Some("old-current-key".to_string()),
+            }),
+            &Context::new(Some(PathBuf::from("/private/tmp/poha-cli-test-recordings"))),
+            None,
+        )
+        .expect_err("explicit current key must be rejected before dispatch");
+
+        assert_eq!(error.code, "controlInvalidRequest");
+        assert_eq!(error.idempotency_key.as_deref(), Some("old-current-key"));
+        assert!(error.message.contains("--retry"));
     }
 
     #[test]

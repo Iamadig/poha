@@ -36,6 +36,8 @@ struct Meta {
 struct CliErrorBody {
     code: String,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    idempotency_key: Option<String>,
 }
 
 pub(super) fn emit_success<T: Serialize>(
@@ -60,6 +62,7 @@ pub(super) fn emit_failure(command: &str, error: CliError, ctx: &Context) {
         error: CliErrorBody {
             code: error.code.to_string(),
             message: error.message,
+            idempotency_key: error.idempotency_key,
         },
         meta: meta(ctx, vec![]),
     };
@@ -85,4 +88,24 @@ fn print_json<T: Serialize>(body: &T) -> Result<(), CliError> {
     })?;
     println!();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failure_body_serializes_retry_key() {
+        let value = serde_json::to_value(CliErrorBody {
+            code: "controlUnavailable".to_string(),
+            message: "connection closed".to_string(),
+            idempotency_key: Some("generated-retry-key".to_string()),
+        })
+        .expect("serialize failure body");
+
+        assert_eq!(
+            value.get("idempotencyKey").and_then(|value| value.as_str()),
+            Some("generated-retry-key")
+        );
+    }
 }

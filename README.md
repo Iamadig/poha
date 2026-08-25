@@ -66,12 +66,15 @@ poha-cli diagnostics audio --guided
 poha-cli recording status
 poha-cli recording start --idempotency-key <retry-key>
 poha-cli recording stop --current
-poha-cli recording stop --session <session-id>
+poha-cli recording stop --session <session-id> --idempotency-key <retry-key>
+poha-cli recording stop --retry <retry-key>
 ```
 
 Agent-safe writes are limited to `summary.md`, `meeting.json`, `.poha/meetings.sqlite`, and `.poha/exports`. Poha does not let the CLI rewrite audio, `session.json`, or transcript evidence.
 
 `recording status` is read-only. `recording start` and `recording stop` are stateful commands that control microphone and system-audio capture in the running Poha app. They use a private same-user Unix socket instead of UI automation. Any process running as your macOS user that can access Poha's control directory is inside that trust boundary, so do not share the directory or its bearer token.
+
+Start and stop retry keys are recorded durably before capture changes. If `--idempotency-key` is omitted, the CLI generates one and returns it for mutation dispatches in both success and error JSON. `--current` first observes a specific active session, creates a new key, and refuses an explicit key; after an uncertain dispatch, use `recording stop --retry <key>`. That retry only reads the durable outcome, and a key Poha never received returns `not found` without stopping anything. These rules prevent duplicate starts and keep an old stop retry from affecting a newer session.
 
 You are responsible for obtaining participant consent and complying with recording laws and organizational policies before starting capture, whether from the menu bar or `poha-cli`.
 

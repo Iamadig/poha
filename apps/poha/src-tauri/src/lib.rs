@@ -13,7 +13,6 @@ mod recording_end_reminder_runtime;
 pub mod storage_lifecycle;
 mod transcription;
 
-use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -24,6 +23,7 @@ use control_protocol::{
     ControlAction, ControlCommand, ControlError, ControlErrorCode, ControlResult, RecordingPhase,
     RecordingState, StopTarget,
 };
+use control_socket::{ControlOperationJournal, StoredControlOperation};
 use controller::{AppController, PermissionState, RecorderPhase};
 #[cfg(target_os = "macos")]
 use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio};
@@ -37,14 +37,12 @@ use tauri_plugin_transcription::{CaptureLifecycleEvent, CaptureParams, ListenerP
 const CAPTURE_LIFECYCLE_EVENT_NAME: &str = "plugin:transcription:capture-lifecycle-event";
 const BATCH_CAPTURE_BASE_URL: &str = "http://localhost:50060/v1";
 const BATCH_CAPTURE_MODEL: &str = "cactus-parakeet-tdt-0.6b-v3-int8";
-const CONTROL_IDEMPOTENCY_HISTORY_LIMIT: usize = 128;
-
 #[derive(Default)]
 struct AppState {
     controller: Mutex<Option<AppController>>,
     live_transcription: Mutex<Option<transcription::LiveTranscriptionHandle>>,
     audio_check_state: Mutex<Option<audio_check_window::AudioCheckState>>,
-    control_start_history: Mutex<VecDeque<(String, String)>>,
+    recording_transition_gate: tokio::sync::Mutex<()>,
 }
 
 #[derive(Clone)]
@@ -176,12 +174,14 @@ pub async fn main() {
 fn install_control_server(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let paths = control_socket::default_control_paths()?;
     let server = control_socket::ControlServer::bind(paths)?;
+    let journal = ControlOperationJournal::open(server.paths())?;
     let app_for_handler = app.clone();
     tauri::async_runtime::spawn(async move {
         let result = server
             .serve(move |command| {
                 let app = app_for_handler.clone();
-                async move { handle_control_command(app, command).await }
+                let journal = journal.clone();
+                async move { handle_control_command(app, journal, command).await }
             })
             .await;
         if let Err(error) = result {
@@ -193,6 +193,7 @@ fn install_control_server(app: &tauri::AppHandle) -> Result<(), Box<dyn std::err
 
 async fn handle_control_command(
     app: tauri::AppHandle,
+    journal: ControlOperationJournal,
     command: ControlCommand,
 ) -> Result<ControlResult, ControlError> {
     match command {
@@ -201,89 +202,408 @@ async fn handle_control_command(
             control_recording_state(&app)?,
         )),
         ControlCommand::Start { idempotency_key } => {
-            let state_before = control_recording_state(&app)?;
-            if let Some(known_session) = control_start_session(&app, &idempotency_key)? {
-                if state_before.active_session_id.as_deref() == Some(known_session.as_str()) {
-                    return Ok(ControlResult::new(
-                        ControlAction::StartReplayed,
-                        state_before,
-                    ));
-                }
-                return Err(ControlError::new(
-                    ControlErrorCode::Conflict,
-                    format!(
-                        "idempotency key already belongs to session {known_session}; refusing to start another recording"
-                    ),
-                )
-                .with_state(state_before));
-            }
-            if state_before.active_session_id.is_some()
-                || matches!(
-                    state_before.phase,
-                    RecordingPhase::Recording | RecordingPhase::Finalizing
-                )
-            {
-                return Err(ControlError::new(
-                    ControlErrorCode::Conflict,
-                    "another recording is already active",
-                )
-                .with_state(state_before));
-            }
-
-            let controller = get_controller(&app).map_err(control_internal_error)?;
-            if controller.permission_snapshot.microphone != PermissionState::Authorized
-                || controller.permission_snapshot.system_audio != PermissionState::Authorized
-            {
-                return Err(ControlError::new(
-                    ControlErrorCode::PermissionDenied,
-                    "microphone and system-audio permissions must be granted in Poha first",
-                )
-                .with_state(control_recording_state(&app)?));
-            }
-
-            let session_id = start_recording(app.clone())
-                .await
-                .map_err(|error| control_conflict_or_internal(&app, error))?;
-            remember_control_start(&app, idempotency_key, session_id)?;
-            Ok(ControlResult::new(
-                ControlAction::Started,
-                control_recording_state(&app)?,
-            ))
+            handle_control_start(app, journal, idempotency_key).await
         }
-        ControlCommand::Stop { target } => {
-            let state_before = control_recording_state(&app)?;
-            let Some(active_session_id) = state_before.active_session_id.clone() else {
-                return Ok(ControlResult::new(
-                    ControlAction::AlreadyStopped,
-                    state_before,
-                ));
+        ControlCommand::Stop {
+            target,
+            idempotency_key,
+        } => handle_control_stop(app, journal, target, idempotency_key).await,
+        ControlCommand::StopRetry { idempotency_key } => {
+            handle_control_stop_retry(app, journal, idempotency_key).await
+        }
+    }
+}
+
+async fn handle_control_start(
+    app: tauri::AppHandle,
+    journal: ControlOperationJournal,
+    idempotency_key: String,
+) -> Result<ControlResult, ControlError> {
+    let app_state = app.state::<AppState>();
+    let _transition_guard = app_state.recording_transition_gate.lock().await;
+    let state_before = control_recording_state(&app)?;
+
+    if let Some(stored) = journal
+        .operation(&idempotency_key)
+        .map_err(|error| control_journal_error(&app, "read", error))?
+    {
+        return replay_control_start(&app, stored);
+    }
+
+    let session_id = uuid::Uuid::new_v4().to_string();
+    if state_before.active_session_id.is_some()
+        || matches!(
+            state_before.phase,
+            RecordingPhase::Recording | RecordingPhase::Finalizing
+        )
+    {
+        let error = ControlError::new(
+            ControlErrorCode::Conflict,
+            "another recording is already active",
+        );
+        persist_new_start_failure(
+            &app,
+            &journal,
+            &idempotency_key,
+            Some(session_id.clone()),
+            &error,
+        )?;
+        return Err(error
+            .with_state(state_before)
+            .with_operation_session_id(Some(session_id)));
+    }
+
+    let controller = get_controller(&app).map_err(control_internal_error)?;
+    if controller.permission_snapshot.microphone != PermissionState::Authorized
+        || controller.permission_snapshot.system_audio != PermissionState::Authorized
+    {
+        let error = ControlError::new(
+            ControlErrorCode::PermissionDenied,
+            "microphone and system-audio permissions must be granted in Poha first",
+        );
+        persist_new_start_failure(
+            &app,
+            &journal,
+            &idempotency_key,
+            Some(session_id.clone()),
+            &error,
+        )?;
+        return Err(error
+            .with_state(control_recording_state(&app)?)
+            .with_operation_session_id(Some(session_id)));
+    }
+
+    let pending = StoredControlOperation::StartPending {
+        session_id: session_id.clone(),
+    };
+    journal
+        .insert(&idempotency_key, pending.clone())
+        .map_err(|error| control_journal_error(&app, "persist pending start", error))?;
+
+    match start_recording_with_session_id(app.clone(), false, "Capture active", session_id.clone())
+        .await
+    {
+        Ok(_) => {
+            let started = StoredControlOperation::StartStarted {
+                session_id: session_id.clone(),
             };
-            if let StopTarget::Session { session_id } = target
-                && session_id != active_session_id
-            {
-                return Err(ControlError::new(
-                    ControlErrorCode::Conflict,
-                    format!(
-                        "active session is {active_session_id}; refusing to stop stale session {session_id}"
-                    ),
-                )
-                .with_state(state_before));
-            }
-            if state_before.phase == RecordingPhase::Finalizing {
-                return Ok(ControlResult::new(
-                    ControlAction::StopReplayed,
-                    state_before,
-                ));
-            }
-
-            stop_recording(app.clone())
-                .await
-                .map_err(|error| control_conflict_or_internal(&app, error))?;
-            Ok(ControlResult::new(
-                ControlAction::Stopped,
-                control_recording_state(&app)?,
-            ))
+            journal
+                .transition(&idempotency_key, &pending, started)
+                .map_err(|error| {
+                    control_journal_error(&app, "persist completed start", error)
+                        .with_operation_session_id(Some(session_id.clone()))
+                })?;
+            Ok(
+                ControlResult::new(ControlAction::Started, control_recording_state(&app)?)
+                    .with_operation_session_id(Some(session_id)),
+            )
         }
+        Err(message) => {
+            let error = control_conflict_or_internal(&app, message)
+                .with_operation_session_id(Some(session_id.clone()));
+            let failed = StoredControlOperation::StartFailed {
+                session_id: Some(session_id.clone()),
+                code: error.code,
+                message: error.message.clone(),
+            };
+            if let Err(journal_error) = journal.transition(&idempotency_key, &pending, failed) {
+                return Err(control_journal_error(
+                    &app,
+                    &format!(
+                        "persist failed start after capture returned: {}",
+                        error.message
+                    ),
+                    journal_error,
+                )
+                .with_operation_session_id(Some(session_id)));
+            }
+            Err(error)
+        }
+    }
+}
+
+fn replay_control_start(
+    app: &tauri::AppHandle,
+    stored: StoredControlOperation,
+) -> Result<ControlResult, ControlError> {
+    let operation_session_id = stored.operation_session_id().map(ToString::to_string);
+    match stored {
+        StoredControlOperation::StartStarted { .. } => Ok(ControlResult::new(
+            ControlAction::StartReplayed,
+            control_recording_state(app)?,
+        )
+        .with_operation_session_id(operation_session_id)),
+        StoredControlOperation::StartPending { .. } => Err(ControlError::new(
+            ControlErrorCode::Conflict,
+            "start outcome is indeterminate because the app stopped after persisting the operation; this key will never start capture again",
+        )
+        .with_state(control_recording_state(app)?)
+        .with_operation_session_id(operation_session_id)),
+        StoredControlOperation::StartFailed { code, message, .. } => Err(
+            ControlError::new(code, message)
+                .with_state(control_recording_state(app)?)
+                .with_operation_session_id(operation_session_id),
+        ),
+        _ => Err(ControlError::new(
+            ControlErrorCode::Conflict,
+            "idempotency key is permanently bound to a stop operation",
+        )
+        .with_state(control_recording_state(app)?)
+        .with_operation_session_id(operation_session_id)),
+    }
+}
+
+async fn handle_control_stop(
+    app: tauri::AppHandle,
+    journal: ControlOperationJournal,
+    target: StopTarget,
+    idempotency_key: String,
+) -> Result<ControlResult, ControlError> {
+    let app_state = app.state::<AppState>();
+    let _transition_guard = app_state.recording_transition_gate.lock().await;
+    let state_before = control_recording_state(&app)?;
+
+    if let Some(stored) = journal
+        .operation(&idempotency_key)
+        .map_err(|error| control_journal_error(&app, "read", error))?
+    {
+        return replay_control_stop(&app, &target, stored);
+    }
+
+    let requested_session_id = match &target {
+        StopTarget::Current {
+            observed_session_id,
+        } => observed_session_id.clone(),
+        StopTarget::Session { session_id } => Some(session_id.clone()),
+    };
+    let Some(active_session_id) = state_before.active_session_id.clone() else {
+        let noop = StoredControlOperation::StopNoop {
+            target,
+            session_id: requested_session_id.clone(),
+        };
+        journal
+            .insert(&idempotency_key, noop)
+            .map_err(|error| control_journal_error(&app, "persist completed no-op stop", error))?;
+        return Ok(
+            ControlResult::new(ControlAction::AlreadyStopped, state_before)
+                .with_operation_session_id(requested_session_id),
+        );
+    };
+
+    if requested_session_id.as_deref() != Some(active_session_id.as_str()) {
+        let message = match requested_session_id.as_deref() {
+            Some(requested_session_id) => format!(
+                "active session is {active_session_id}; refusing to stop stale session {requested_session_id}"
+            ),
+            None => format!(
+                "request observed no active session; refusing to stop later session {active_session_id}"
+            ),
+        };
+        let error = ControlError::new(ControlErrorCode::Conflict, message);
+        let failed = StoredControlOperation::StopFailed {
+            target,
+            session_id: requested_session_id.clone(),
+            code: error.code,
+            message: error.message.clone(),
+        };
+        journal
+            .insert(&idempotency_key, failed)
+            .map_err(|journal_error| {
+                control_journal_error(&app, "persist rejected stop", journal_error)
+            })?;
+        return Err(error
+            .with_state(state_before)
+            .with_operation_session_id(requested_session_id));
+    }
+
+    if state_before.phase == RecordingPhase::Finalizing {
+        let stopped = StoredControlOperation::StopStopped {
+            target,
+            session_id: active_session_id.clone(),
+        };
+        journal
+            .insert(&idempotency_key, stopped)
+            .map_err(|error| control_journal_error(&app, "persist replayed stop", error))?;
+        return Ok(
+            ControlResult::new(ControlAction::StopReplayed, state_before)
+                .with_operation_session_id(Some(active_session_id)),
+        );
+    }
+
+    let pending = StoredControlOperation::StopPending {
+        target: target.clone(),
+        session_id: active_session_id.clone(),
+    };
+    journal
+        .insert(&idempotency_key, pending.clone())
+        .map_err(|error| control_journal_error(&app, "persist pending stop", error))?;
+
+    match stop_recording_for_session(
+        app.clone(),
+        StopRecordingReason::Manual,
+        Some(&active_session_id),
+    )
+    .await
+    {
+        Ok(()) => {
+            let stopped = StoredControlOperation::StopStopped {
+                target,
+                session_id: active_session_id.clone(),
+            };
+            journal
+                .transition(&idempotency_key, &pending, stopped)
+                .map_err(|error| {
+                    control_journal_error(&app, "persist completed stop", error)
+                        .with_operation_session_id(Some(active_session_id.clone()))
+                })?;
+            Ok(
+                ControlResult::new(ControlAction::Stopped, control_recording_state(&app)?)
+                    .with_operation_session_id(Some(active_session_id)),
+            )
+        }
+        Err(message) => {
+            let error = control_conflict_or_internal(&app, message)
+                .with_operation_session_id(Some(active_session_id.clone()));
+            let failed = StoredControlOperation::StopFailed {
+                target,
+                session_id: Some(active_session_id.clone()),
+                code: error.code,
+                message: error.message.clone(),
+            };
+            if let Err(journal_error) = journal.transition(&idempotency_key, &pending, failed) {
+                return Err(control_journal_error(
+                    &app,
+                    &format!(
+                        "persist failed stop after capture returned: {}",
+                        error.message
+                    ),
+                    journal_error,
+                )
+                .with_operation_session_id(Some(active_session_id)));
+            }
+            Err(error)
+        }
+    }
+}
+
+fn replay_control_stop(
+    app: &tauri::AppHandle,
+    requested_target: &StopTarget,
+    stored: StoredControlOperation,
+) -> Result<ControlResult, ControlError> {
+    let operation_session_id = stored.operation_session_id().map(ToString::to_string);
+    let stored_target = match &stored {
+        StoredControlOperation::StopPending { target, .. }
+        | StoredControlOperation::StopStopped { target, .. }
+        | StoredControlOperation::StopNoop { target, .. }
+        | StoredControlOperation::StopFailed { target, .. } => Some(target),
+        _ => None,
+    };
+    if let Some(stored_target) = stored_target
+        && stored_target != requested_target
+    {
+        return Err(ControlError::new(
+            ControlErrorCode::Conflict,
+            "idempotency key is bound to a different stop target",
+        )
+        .with_state(control_recording_state(app)?)
+        .with_operation_session_id(operation_session_id));
+    }
+
+    replay_stored_control_stop(app, stored)
+}
+
+async fn handle_control_stop_retry(
+    app: tauri::AppHandle,
+    journal: ControlOperationJournal,
+    idempotency_key: String,
+) -> Result<ControlResult, ControlError> {
+    let app_state = app.state::<AppState>();
+    let _transition_guard = app_state.recording_transition_gate.lock().await;
+    let state = control_recording_state(&app)?;
+    let stored = journal
+        .operation(&idempotency_key)
+        .map_err(|error| control_journal_error(&app, "read stop retry", error))?
+        .ok_or_else(|| {
+            ControlError::new(
+                ControlErrorCode::NotFound,
+                "stop retry key was never received by Poha; no recording was stopped",
+            )
+            .with_state(state)
+        })?;
+    replay_stored_control_stop(&app, stored)
+}
+
+fn replay_stored_control_stop(
+    app: &tauri::AppHandle,
+    stored: StoredControlOperation,
+) -> Result<ControlResult, ControlError> {
+    let operation_session_id = stored.operation_session_id().map(ToString::to_string);
+
+    match stored {
+        StoredControlOperation::StopStopped { .. } => Ok(ControlResult::new(
+            ControlAction::StopReplayed,
+            control_recording_state(app)?,
+        )
+        .with_operation_session_id(operation_session_id)),
+        StoredControlOperation::StopNoop { .. } => Ok(ControlResult::new(
+            ControlAction::AlreadyStopped,
+            control_recording_state(app)?,
+        )
+        .with_operation_session_id(operation_session_id)),
+        StoredControlOperation::StopPending { .. } => Err(ControlError::new(
+            ControlErrorCode::Conflict,
+            "stop outcome is indeterminate because the app stopped after binding the operation; this key will never stop another session",
+        )
+        .with_state(control_recording_state(app)?)
+        .with_operation_session_id(operation_session_id)),
+        StoredControlOperation::StopFailed { code, message, .. } => Err(
+            ControlError::new(code, message)
+                .with_state(control_recording_state(app)?)
+                .with_operation_session_id(operation_session_id),
+        ),
+        _ => Err(ControlError::new(
+            ControlErrorCode::Conflict,
+            "idempotency key is permanently bound to a start operation",
+        )
+        .with_state(control_recording_state(app)?)
+        .with_operation_session_id(operation_session_id)),
+    }
+}
+
+fn persist_new_start_failure(
+    app: &tauri::AppHandle,
+    journal: &ControlOperationJournal,
+    idempotency_key: &str,
+    session_id: Option<String>,
+    error: &ControlError,
+) -> Result<(), ControlError> {
+    journal
+        .insert(
+            idempotency_key,
+            StoredControlOperation::StartFailed {
+                session_id,
+                code: error.code,
+                message: error.message.clone(),
+            },
+        )
+        .map_err(|journal_error| {
+            control_journal_error(app, "persist rejected start", journal_error)
+        })
+}
+
+fn control_journal_error(
+    app: &tauri::AppHandle,
+    action: &str,
+    error: impl std::fmt::Display,
+) -> ControlError {
+    let error = ControlError::new(
+        ControlErrorCode::Internal,
+        format!("failed to {action} in durable control journal: {error}"),
+    );
+    match control_recording_state(app) {
+        Ok(state) => error.with_state(state),
+        Err(_) => error,
     }
 }
 
@@ -300,42 +620,6 @@ fn control_recording_state(app: &tauri::AppHandle) -> Result<RecordingState, Con
         phase,
         controller.active_session_id.clone(),
     ))
-}
-
-fn control_start_session(
-    app: &tauri::AppHandle,
-    key: &str,
-) -> Result<Option<String>, ControlError> {
-    let state = app.state::<AppState>();
-    state
-        .control_start_history
-        .lock()
-        .map(|guard| {
-            guard
-                .iter()
-                .rev()
-                .find(|(known_key, _)| known_key == key)
-                .map(|(_, session_id)| session_id.clone())
-        })
-        .map_err(|_| control_internal_error("control idempotency lock poisoned"))
-}
-
-fn remember_control_start(
-    app: &tauri::AppHandle,
-    key: String,
-    session_id: String,
-) -> Result<(), ControlError> {
-    let state = app.state::<AppState>();
-    let mut guard = state
-        .control_start_history
-        .lock()
-        .map_err(|_| control_internal_error("control idempotency lock poisoned"))?;
-    guard.retain(|(known_key, _)| known_key != &key);
-    guard.push_back((key, session_id));
-    while guard.len() > CONTROL_IDEMPOTENCY_HISTORY_LIMIT {
-        guard.pop_front();
-    }
-    Ok(())
 }
 
 fn control_conflict_or_internal(app: &tauri::AppHandle, error: String) -> ControlError {
@@ -1386,6 +1670,18 @@ async fn start_recording_inner(
     onboarding: bool,
     status_detail: &str,
 ) -> Result<String, String> {
+    let app_state = app.state::<AppState>();
+    let _transition_guard = app_state.recording_transition_gate.lock().await;
+    let session_id = uuid::Uuid::new_v4().to_string();
+    start_recording_with_session_id(app.clone(), onboarding, status_detail, session_id).await
+}
+
+async fn start_recording_with_session_id(
+    app: tauri::AppHandle,
+    onboarding: bool,
+    status_detail: &str,
+    session_id: String,
+) -> Result<String, String> {
     let mut controller = get_controller(&app)?;
     if !controller.can_start_recording() {
         return Err(format!(
@@ -1394,7 +1690,6 @@ async fn start_recording_inner(
         ));
     }
 
-    let session_id = uuid::Uuid::new_v4().to_string();
     let vault_base = app
         .settings()
         .vault_base()
@@ -1876,7 +2171,25 @@ pub(crate) async fn stop_recording_inner(
     app: tauri::AppHandle,
     reason: StopRecordingReason,
 ) -> Result<(), String> {
+    let app_state = app.state::<AppState>();
+    let _transition_guard = app_state.recording_transition_gate.lock().await;
+    stop_recording_for_session(app.clone(), reason, None).await
+}
+
+async fn stop_recording_for_session(
+    app: tauri::AppHandle,
+    reason: StopRecordingReason,
+    expected_session_id: Option<&str>,
+) -> Result<(), String> {
     let mut controller = get_controller(&app)?;
+    if let Some(expected_session_id) = expected_session_id
+        && controller.active_session_id.as_deref() != Some(expected_session_id)
+    {
+        return Err(format!(
+            "cannot stop session {expected_session_id}; active session is {}",
+            controller.active_session_id.as_deref().unwrap_or("none")
+        ));
+    }
     if !controller.can_stop_recording() {
         return Err(format!(
             "cannot stop while status is {}",

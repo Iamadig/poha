@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::future::Future;
@@ -20,7 +21,7 @@ use uuid::Uuid;
 
 use crate::control_protocol::{
     CONTROL_PROTOCOL_VERSION, ControlCommand, ControlError, ControlErrorCode, ControlRequest,
-    ControlResponse, ControlResult, MAX_JSON_LINE_BYTES,
+    ControlResponse, ControlResult, MAX_IDEMPOTENCY_KEY_BYTES, MAX_JSON_LINE_BYTES,
 };
 
 const CONTROL_DIR_MODE: u32 = 0o700;
@@ -28,10 +29,13 @@ const CONTROL_FILE_MODE: u32 = 0o600;
 const SOCKET_FILE_NAME: &str = "control.sock";
 const TOKEN_FILE_NAME: &str = "token";
 const METADATA_FILE_NAME: &str = "control.json";
+const OPERATION_JOURNAL_FILE_NAME: &str = "operations.json";
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(30);
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_TOKEN_BYTES: u64 = 1024;
+const MAX_OPERATION_JOURNAL_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_UNIX_SOCKET_PATH_BYTES: usize = 103;
+const OPERATION_JOURNAL_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlPaths {
@@ -59,6 +63,10 @@ impl ControlPaths {
 
     pub fn metadata_path(&self) -> PathBuf {
         self.control_dir.join(METADATA_FILE_NAME)
+    }
+
+    pub fn operation_journal_path(&self) -> PathBuf {
+        self.control_dir.join(OPERATION_JOURNAL_FILE_NAME)
     }
 
     fn validate(&self) -> io::Result<()> {
@@ -99,6 +107,178 @@ struct ControlMetadata {
     created_at: String,
     socket_path: String,
     token_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "camelCase", deny_unknown_fields)]
+pub enum StoredControlOperation {
+    StartPending {
+        session_id: String,
+    },
+    StartStarted {
+        session_id: String,
+    },
+    StartFailed {
+        session_id: Option<String>,
+        code: ControlErrorCode,
+        message: String,
+    },
+    StopPending {
+        target: crate::control_protocol::StopTarget,
+        session_id: String,
+    },
+    StopStopped {
+        target: crate::control_protocol::StopTarget,
+        session_id: String,
+    },
+    StopNoop {
+        target: crate::control_protocol::StopTarget,
+        session_id: Option<String>,
+    },
+    StopFailed {
+        target: crate::control_protocol::StopTarget,
+        session_id: Option<String>,
+        code: ControlErrorCode,
+        message: String,
+    },
+}
+
+impl StoredControlOperation {
+    pub fn operation_session_id(&self) -> Option<&str> {
+        match self {
+            Self::StartPending { session_id }
+            | Self::StartStarted { session_id }
+            | Self::StopPending { session_id, .. }
+            | Self::StopStopped { session_id, .. } => Some(session_id),
+            Self::StartFailed { session_id, .. }
+            | Self::StopNoop { session_id, .. }
+            | Self::StopFailed { session_id, .. } => session_id.as_deref(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OperationJournalFile {
+    version: u32,
+    operations: BTreeMap<String, StoredControlOperation>,
+}
+
+impl OperationJournalFile {
+    fn empty() -> Self {
+        Self {
+            version: OPERATION_JOURNAL_VERSION,
+            operations: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ControlOperationJournal {
+    path: PathBuf,
+}
+
+impl ControlOperationJournal {
+    pub fn open(paths: &ControlPaths) -> io::Result<Self> {
+        let journal = Self {
+            path: paths.operation_journal_path(),
+        };
+        let _ = journal.load()?;
+        Ok(journal)
+    }
+
+    pub fn operation(&self, idempotency_key: &str) -> io::Result<Option<StoredControlOperation>> {
+        Ok(self.load()?.operations.get(idempotency_key).cloned())
+    }
+
+    pub fn insert(
+        &self,
+        idempotency_key: &str,
+        operation: StoredControlOperation,
+    ) -> io::Result<()> {
+        validate_journal_key(idempotency_key)?;
+        let mut journal = self.load()?;
+        if journal.operations.contains_key(idempotency_key) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("control idempotency key already exists: {idempotency_key}"),
+            ));
+        }
+        journal
+            .operations
+            .insert(idempotency_key.to_string(), operation);
+        self.write(&journal)
+    }
+
+    pub fn transition(
+        &self,
+        idempotency_key: &str,
+        expected: &StoredControlOperation,
+        next: StoredControlOperation,
+    ) -> io::Result<()> {
+        let mut journal = self.load()?;
+        match journal.operations.get(idempotency_key) {
+            Some(current) if current == expected => {}
+            Some(current) => {
+                return Err(invalid_data(format!(
+                    "control operation {idempotency_key} changed unexpectedly from {expected:?} to {current:?}"
+                )));
+            }
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("control operation not found: {idempotency_key}"),
+                ));
+            }
+        }
+        journal.operations.insert(idempotency_key.to_string(), next);
+        self.write(&journal)
+    }
+
+    fn load(&self) -> io::Result<OperationJournalFile> {
+        match fs::symlink_metadata(&self.path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(OperationJournalFile::empty());
+            }
+            Err(error) => return Err(error),
+        }
+        verify_secure_path(&self.path, false, CONTROL_FILE_MODE)?;
+        let bytes = read_bounded_file(&self.path, MAX_OPERATION_JOURNAL_BYTES)?;
+        let journal: OperationJournalFile = serde_json::from_slice(&bytes)
+            .map_err(|error| invalid_data(format!("invalid control operation journal: {error}")))?;
+        if journal.version != OPERATION_JOURNAL_VERSION {
+            return Err(invalid_data(format!(
+                "unsupported control operation journal version {}; expected {}",
+                journal.version, OPERATION_JOURNAL_VERSION
+            )));
+        }
+        Ok(journal)
+    }
+
+    fn write(&self, journal: &OperationJournalFile) -> io::Result<()> {
+        let bytes = serde_json::to_vec_pretty(journal).map_err(|error| {
+            invalid_data(format!(
+                "failed encoding control operation journal: {error}"
+            ))
+        })?;
+        if bytes.len() as u64 > MAX_OPERATION_JOURNAL_BYTES {
+            return Err(invalid_data(format!(
+                "control operation journal exceeds the {MAX_OPERATION_JOURNAL_BYTES}-byte limit; no entries were removed"
+            )));
+        }
+        write_secure_file(&self.path, &bytes)
+    }
+}
+
+fn validate_journal_key(idempotency_key: &str) -> io::Result<()> {
+    if idempotency_key.trim().is_empty() || idempotency_key.len() > MAX_IDEMPOTENCY_KEY_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("control idempotency key must contain 1 to {MAX_IDEMPOTENCY_KEY_BYTES} bytes"),
+        ));
+    }
+    Ok(())
 }
 
 pub struct ControlServer {
@@ -578,15 +758,27 @@ fn write_secure_file(path: &Path, contents: &[u8]) -> io::Result<()> {
             .mode(CONTROL_FILE_MODE)
             .open(&temporary)?;
         file.write_all(contents)?;
-        file.sync_all()?;
         fs::set_permissions(&temporary, fs::Permissions::from_mode(CONTROL_FILE_MODE))?;
+        file.sync_all()?;
+        drop(file);
         fs::rename(&temporary, path)?;
-        set_mode(path, CONTROL_FILE_MODE)
+        set_mode(path, CONTROL_FILE_MODE)?;
+        sync_parent_directory(path)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+fn sync_parent_directory(path: &Path) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("control path has no parent directory: {}", path.display()),
+        )
+    })?;
+    File::open(parent)?.sync_all()
 }
 
 fn read_control_metadata(path: &Path) -> io::Result<ControlMetadata> {
@@ -792,12 +984,18 @@ mod tests {
                     RecordingState::new(RecordingPhase::Recording, Some("session-1".to_string())),
                 ),
                 ControlCommand::Stop {
-                    target: StopTarget::Current,
+                    target: StopTarget::Current { .. },
+                    ..
                 }
                 | ControlCommand::Stop {
                     target: StopTarget::Session { .. },
+                    ..
                 } => (
                     ControlAction::Stopped,
+                    RecordingState::new(RecordingPhase::Finalizing, None),
+                ),
+                ControlCommand::StopRetry { .. } => (
+                    ControlAction::StopReplayed,
                     RecordingState::new(RecordingPhase::Finalizing, None),
                 ),
             };
@@ -825,6 +1023,98 @@ mod tests {
         assert!(!paths.socket_path().exists());
         assert!(!paths.token_path().exists());
         assert!(!paths.metadata_path().exists());
+    }
+
+    #[test]
+    fn operation_journal_is_durable_and_never_reuses_keys() {
+        let temp = tempfile::tempdir_in("/private/tmp").expect("temp dir");
+        let paths = ControlPaths::new(temp.path().join("control"));
+        secure_control_directory(paths.control_dir()).expect("secure control dir");
+        let journal = ControlOperationJournal::open(&paths).expect("open journal");
+        let pending = StoredControlOperation::StartPending {
+            session_id: "session-1".to_string(),
+        };
+        journal
+            .insert("start-key", pending.clone())
+            .expect("persist pending");
+
+        let reopened = ControlOperationJournal::open(&paths).expect("reopen journal");
+        assert_eq!(
+            reopened.operation("start-key").expect("read pending"),
+            Some(pending.clone())
+        );
+        assert_eq!(mode(&paths.operation_journal_path()), CONTROL_FILE_MODE);
+
+        let started = StoredControlOperation::StartStarted {
+            session_id: "session-1".to_string(),
+        };
+        reopened
+            .transition("start-key", &pending, started.clone())
+            .expect("persist started");
+        assert_eq!(
+            ControlOperationJournal::open(&paths)
+                .expect("reopen transitioned journal")
+                .operation("start-key")
+                .expect("read started"),
+            Some(started)
+        );
+
+        let duplicate = reopened
+            .insert(
+                "start-key",
+                StoredControlOperation::StartPending {
+                    session_id: "session-2".to_string(),
+                },
+            )
+            .expect_err("duplicate key must fail");
+        assert_eq!(duplicate.kind(), io::ErrorKind::AlreadyExists);
+        assert!(
+            fs::read_dir(paths.control_dir())
+                .expect("read control dir")
+                .filter_map(Result::ok)
+                .all(|entry| !entry.file_name().to_string_lossy().ends_with(".tmp"))
+        );
+    }
+
+    #[test]
+    fn stop_journal_binds_current_to_observed_session() {
+        let temp = tempfile::tempdir_in("/private/tmp").expect("temp dir");
+        let paths = ControlPaths::new(temp.path().join("control"));
+        secure_control_directory(paths.control_dir()).expect("secure control dir");
+        let journal = ControlOperationJournal::open(&paths).expect("open journal");
+        let pending = StoredControlOperation::StopPending {
+            target: StopTarget::Current {
+                observed_session_id: Some("observed-session".to_string()),
+            },
+            session_id: "observed-session".to_string(),
+        };
+        journal
+            .insert("stop-key", pending.clone())
+            .expect("persist pending stop");
+
+        let reloaded = journal
+            .operation("stop-key")
+            .expect("reload stop operation")
+            .expect("stored stop operation");
+        assert_eq!(reloaded, pending);
+        assert_eq!(reloaded.operation_session_id(), Some("observed-session"));
+
+        let stopped = StoredControlOperation::StopStopped {
+            target: StopTarget::Current {
+                observed_session_id: Some("observed-session".to_string()),
+            },
+            session_id: "observed-session".to_string(),
+        };
+        journal
+            .transition("stop-key", &pending, stopped.clone())
+            .expect("persist completed stop");
+        assert_eq!(
+            ControlOperationJournal::open(&paths)
+                .expect("reopen completed stop")
+                .operation("stop-key")
+                .expect("reload completed stop"),
+            Some(stopped)
+        );
     }
 
     fn mode(path: &Path) -> u32 {
