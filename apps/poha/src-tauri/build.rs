@@ -1,12 +1,26 @@
 fn main() {
     #[cfg(target_os = "macos")]
-    println!("cargo:rustc-link-arg=-fapple-link-rtlib");
+    {
+        println!("cargo:rustc-link-arg=-fapple-link-rtlib");
+        link_eventkit_calendar();
+    }
 
     #[cfg(target_os = "macos")]
     build_poha_diarizer();
 
     tauri_build::build()
 }
+
+#[cfg(target_os = "macos")]
+fn link_eventkit_calendar() {
+    swift_rs::SwiftLinker::new("14.2")
+        .with_package("poha-calendar-eventkit", "./calendar-eventkit/")
+        .link();
+    println!("cargo:rustc-link-lib=framework=EventKit");
+}
+
+#[cfg(not(target_os = "macos"))]
+fn link_eventkit_calendar() {}
 
 #[cfg(target_os = "macos")]
 fn build_poha_diarizer() {
