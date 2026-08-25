@@ -11,6 +11,14 @@ const LEGACY_SLOW_MLX_MODEL: &str = "mlx-community/whisper-large-v3-turbo";
 const LEGACY_BROKEN_MLX_MODEL: &str = "mlx-community/whisper-large-v3-turbo-8bit";
 const LEGACY_MLX_FALLBACK_MODEL: &str = "mlx-community/whisper-small";
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RecordingMode {
+    #[default]
+    RecordOnly,
+    RecordAndTranscribe,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SpeakerLabelMode {
@@ -40,6 +48,9 @@ pub struct RecorderSettings {
     pub mlx_model: String,
     pub mlx_fallback_model: String,
     pub mic_device_id: Option<String>,
+    #[serde(default)]
+    pub recording_mode: RecordingMode,
+    #[serde(default = "default_preserve_stems")]
     pub preserve_stems: bool,
     #[serde(default)]
     pub speaker_label_mode: SpeakerLabelMode,
@@ -58,7 +69,8 @@ impl RecorderSettings {
             mlx_model: DEFAULT_MLX_MODEL.to_string(),
             mlx_fallback_model: DEFAULT_MLX_FALLBACK_MODEL.to_string(),
             mic_device_id: None,
-            preserve_stems: false,
+            recording_mode: RecordingMode::default(),
+            preserve_stems: true,
             speaker_label_mode: SpeakerLabelMode::default(),
             system_audio_authorized_hint: false,
             onboarding_completed: false,
@@ -100,9 +112,10 @@ pub fn load(app: &AppHandle) -> Result<RecorderSettings, String> {
 
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("failed reading settings file {}: {e}", path.display()))?;
-    let raw_settings: serde_json::Value = serde_json::from_str(&content)
+    let mut raw_settings: serde_json::Value = serde_json::from_str(&content)
         .map_err(|e| format!("invalid settings json {}: {e}", path.display()))?;
     let missing_defaults = missing_persisted_defaults(&raw_settings);
+    preserve_legacy_transcription_default(&mut raw_settings);
     let settings: RecorderSettings = serde_json::from_value(raw_settings)
         .map_err(|e| format!("invalid settings json {}: {e}", path.display()))?;
     let (settings, changed) = migrate_settings(settings);
@@ -130,8 +143,9 @@ pub fn load_from_file(path: &Path, recordings_dir: PathBuf) -> Result<RecorderSe
 
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("failed reading settings file {}: {e}", path.display()))?;
-    let raw_settings: serde_json::Value = serde_json::from_str(&content)
+    let mut raw_settings: serde_json::Value = serde_json::from_str(&content)
         .map_err(|e| format!("invalid settings json {}: {e}", path.display()))?;
+    preserve_legacy_transcription_default(&mut raw_settings);
     let settings: RecorderSettings = serde_json::from_value(raw_settings)
         .map_err(|e| format!("invalid settings json {}: {e}", path.display()))?;
     let (mut settings, _) = migrate_settings(settings);
@@ -196,22 +210,35 @@ fn migrate_settings(mut settings: RecorderSettings) -> (RecorderSettings, bool) 
         changed = true;
     }
 
-    if using_legacy_slow_model && settings.preserve_stems {
-        settings.preserve_stems = false;
-        changed = true;
-    }
-
     (settings, changed)
 }
 
 fn missing_persisted_defaults(settings: &serde_json::Value) -> bool {
-    settings.get("speakerLabelMode").is_none()
+    settings.get("recordingMode").is_none()
+        || settings.get("preserveStems").is_none()
+        || settings.get("speakerLabelMode").is_none()
         || settings.get("systemAudioAuthorizedHint").is_none()
         || settings.get("onboardingCompleted").is_none()
         || settings.get("meetingEndRemindersEnabled").is_none()
 }
 
+/// Existing Poha installs transcribed every recording before `recordingMode`
+/// was introduced. Preserve that behavior when migrating a persisted settings
+/// file while allowing genuinely new installs to default to record-only.
+fn preserve_legacy_transcription_default(settings: &mut serde_json::Value) {
+    let Some(settings) = settings.as_object_mut() else {
+        return;
+    };
+    settings
+        .entry("recordingMode")
+        .or_insert_with(|| serde_json::Value::String("recordAndTranscribe".to_string()));
+}
+
 fn default_meeting_end_reminders_enabled() -> bool {
+    true
+}
+
+fn default_preserve_stems() -> bool {
     true
 }
 
@@ -226,6 +253,7 @@ mod tests {
             mlx_model: LEGACY_PREVIOUS_DEFAULT_MLX_MODEL.to_string(),
             mlx_fallback_model: DEFAULT_MLX_FALLBACK_MODEL.to_string(),
             mic_device_id: None,
+            recording_mode: RecordingMode::RecordAndTranscribe,
             preserve_stems: true,
             speaker_label_mode: SpeakerLabelMode::MeAndCall,
             system_audio_authorized_hint: false,
@@ -235,7 +263,7 @@ mod tests {
         let (migrated, changed) = migrate_settings(legacy);
         assert!(changed);
         assert_eq!(migrated.mlx_model, DEFAULT_MLX_MODEL);
-        assert!(!migrated.preserve_stems);
+        assert!(migrated.preserve_stems);
     }
 
     #[test]
@@ -245,6 +273,7 @@ mod tests {
             mlx_model: LEGACY_SLOW_MLX_MODEL.to_string(),
             mlx_fallback_model: DEFAULT_MLX_FALLBACK_MODEL.to_string(),
             mic_device_id: None,
+            recording_mode: RecordingMode::RecordAndTranscribe,
             preserve_stems: true,
             speaker_label_mode: SpeakerLabelMode::MeAndCall,
             system_audio_authorized_hint: false,
@@ -254,7 +283,7 @@ mod tests {
         let (migrated, changed) = migrate_settings(previous);
         assert!(changed);
         assert_eq!(migrated.mlx_model, DEFAULT_MLX_MODEL);
-        assert!(!migrated.preserve_stems);
+        assert!(migrated.preserve_stems);
     }
 
     #[test]
@@ -264,6 +293,7 @@ mod tests {
             mlx_model: LEGACY_BROKEN_MLX_MODEL.to_string(),
             mlx_fallback_model: DEFAULT_MLX_FALLBACK_MODEL.to_string(),
             mic_device_id: None,
+            recording_mode: RecordingMode::RecordAndTranscribe,
             preserve_stems: true,
             speaker_label_mode: SpeakerLabelMode::MeAndCall,
             system_audio_authorized_hint: false,
@@ -273,7 +303,7 @@ mod tests {
         let (migrated, changed) = migrate_settings(broken);
         assert!(changed);
         assert_eq!(migrated.mlx_model, DEFAULT_MLX_MODEL);
-        assert!(!migrated.preserve_stems);
+        assert!(migrated.preserve_stems);
     }
 
     #[test]
@@ -283,6 +313,7 @@ mod tests {
             mlx_model: "knownsense/whisper-hindi-apex-mlx".to_string(),
             mlx_fallback_model: "mlx-community/whisper-turbo".to_string(),
             mic_device_id: None,
+            recording_mode: RecordingMode::RecordOnly,
             preserve_stems: true,
             speaker_label_mode: SpeakerLabelMode::MeAndCall,
             system_audio_authorized_hint: false,
@@ -301,6 +332,7 @@ mod tests {
             mlx_model: DEFAULT_MLX_MODEL.to_string(),
             mlx_fallback_model: LEGACY_MLX_FALLBACK_MODEL.to_string(),
             mic_device_id: None,
+            recording_mode: RecordingMode::RecordAndTranscribe,
             preserve_stems: true,
             speaker_label_mode: SpeakerLabelMode::MeAndCall,
             system_audio_authorized_hint: false,
@@ -366,6 +398,64 @@ mod tests {
 
         let parsed: RecorderSettings = serde_json::from_str(json).expect("parse settings");
         assert!(parsed.meeting_end_reminders_enabled);
+    }
+
+    #[test]
+    fn recording_mode_defaults_to_record_only() {
+        assert_eq!(RecordingMode::default(), RecordingMode::RecordOnly);
+    }
+
+    #[test]
+    fn missing_recording_mode_defaults_to_record_only() {
+        let json = r#"{
+            "recordingsDir":"/tmp/recordings",
+            "mlxModel":"mlx-community/whisper-turbo",
+            "mlxFallbackModel":"mlx-community/whisper-turbo",
+            "micDeviceId":null,
+            "preserveStems":true
+        }"#;
+
+        let parsed: RecorderSettings = serde_json::from_str(json).expect("parse settings");
+        assert_eq!(parsed.recording_mode, RecordingMode::RecordOnly);
+    }
+
+    #[test]
+    fn persisted_legacy_settings_keep_transcribing_after_migration() {
+        let mut settings: serde_json::Value = serde_json::from_str(
+            r#"{
+                "recordingsDir":"/tmp/recordings",
+                "mlxModel":"mlx-community/whisper-turbo",
+                "mlxFallbackModel":"mlx-community/whisper-turbo",
+                "micDeviceId":null
+            }"#,
+        )
+        .expect("parse settings");
+
+        preserve_legacy_transcription_default(&mut settings);
+        let parsed: RecorderSettings = serde_json::from_value(settings).expect("migrate settings");
+        assert_eq!(parsed.recording_mode, RecordingMode::RecordAndTranscribe);
+    }
+
+    #[test]
+    fn new_settings_preserve_stems_by_default() {
+        let settings =
+            RecorderSettings::default_with_recordings_dir(PathBuf::from("/tmp/recordings"));
+
+        assert_eq!(settings.recording_mode, RecordingMode::RecordOnly);
+        assert!(settings.preserve_stems);
+    }
+
+    #[test]
+    fn missing_preserve_stems_defaults_to_true() {
+        let json = r#"{
+            "recordingsDir":"/tmp/recordings",
+            "mlxModel":"mlx-community/whisper-turbo",
+            "mlxFallbackModel":"mlx-community/whisper-turbo",
+            "micDeviceId":null
+        }"#;
+
+        let parsed: RecorderSettings = serde_json::from_str(json).expect("parse settings");
+        assert!(parsed.preserve_stems);
     }
 
     #[test]

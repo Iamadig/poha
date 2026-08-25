@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -10,12 +11,15 @@ use chrono::Utc;
 use poha_audio_utils::{Source as _, mono_frames, source_from_path};
 use serde::{Deserialize, Serialize};
 
+use crate::manifest::AudioArtifactPaths;
 use crate::recorder_settings::{RecorderSettings, SpeakerLabelMode};
 
 const RAW_MIC_FILE: &str = "audio_mic.wav";
 const PROCESSED_MIC_FILE: &str = "audio_mic_processed.wav";
 const SYSTEM_AUDIO_FILE: &str = "audio_spk.wav";
 const PROCESSED_MIC_DURATION_TOLERANCE_MS: u64 = 1_000;
+const MIN_RECORDING_STEM_DURATION_MS: u64 = 250;
+const MAX_RECORDING_STEM_DRIFT_MS: u64 = 1_000;
 const RAW_ONLY_MIC_ACTIVE_DBFS: f64 = -55.0;
 const RAW_ONLY_SYSTEM_QUIET_DBFS: f64 = -62.0;
 const PROCESSED_MIC_MIN_ACTIVE_DBFS: f64 = -65.0;
@@ -78,6 +82,7 @@ pub struct ProcessInput {
 #[derive(Debug, Clone)]
 pub struct ProcessResult {
     pub audio_output_path: Option<PathBuf>,
+    pub audio_artifacts: AudioArtifactPaths,
     pub transcript_json_path: PathBuf,
     pub transcript_markdown_path: PathBuf,
 }
@@ -216,7 +221,7 @@ pub fn process_session(input: ProcessInput) -> Result<ProcessResult, String> {
         )
     })?;
 
-    copy_audio_artifacts(&input.capture_dir, &input.output_dir)?;
+    let audio_artifacts = archive_audio_artifacts(&input.capture_dir, &input.output_dir)?;
     let audio_output_path = first_existing(
         &input.output_dir,
         &["audio.mp3", "audio.wav", "audio.ogg", "audio.m4a"],
@@ -260,6 +265,7 @@ pub fn process_session(input: ProcessInput) -> Result<ProcessResult, String> {
 
     Ok(ProcessResult {
         audio_output_path,
+        audio_artifacts,
         transcript_json_path,
         transcript_markdown_path,
     })
@@ -281,8 +287,372 @@ fn copy_audio_artifacts(capture_dir: &Path, output_dir: &Path) -> Result<(), Str
         let dst = output_dir.join(file_name);
         std::fs::copy(&src, &dst)
             .map_err(|e| format!("failed copying {} -> {}: {e}", src.display(), dst.display()))?;
+        std::fs::File::open(&dst)
+            .and_then(|file| file.sync_all())
+            .map_err(|e| format!("failed syncing archived audio {}: {e}", dst.display()))?;
     }
     Ok(())
+}
+
+pub(crate) fn remove_verified_capture_stem_duplicates(
+    capture_dir: &Path,
+    output_dir: &Path,
+) -> Result<usize, String> {
+    if capture_dir == output_dir {
+        return Ok(0);
+    }
+
+    let mut duplicates = Vec::new();
+    for file_name in [RAW_MIC_FILE, PROCESSED_MIC_FILE, SYSTEM_AUDIO_FILE] {
+        let source = capture_dir.join(file_name);
+        if !source.exists() {
+            continue;
+        }
+        let archived = output_dir.join(file_name);
+        if !archived.is_file() {
+            return Err(format!(
+                "refusing to clean capture scratch {}; archived copy is missing at {}",
+                source.display(),
+                archived.display()
+            ));
+        }
+        if !files_are_identical(&source, &archived)? {
+            return Err(format!(
+                "refusing to clean capture scratch {}; archived copy differs at {}",
+                source.display(),
+                archived.display()
+            ));
+        }
+        duplicates.push(source);
+    }
+
+    for source in &duplicates {
+        std::fs::remove_file(source).map_err(|error| {
+            format!(
+                "failed removing verified capture duplicate {}: {error}",
+                source.display()
+            )
+        })?;
+    }
+    Ok(duplicates.len())
+}
+
+fn files_are_identical(left: &Path, right: &Path) -> Result<bool, String> {
+    let left_metadata = std::fs::metadata(left)
+        .map_err(|error| format!("failed reading metadata for {}: {error}", left.display()))?;
+    let right_metadata = std::fs::metadata(right)
+        .map_err(|error| format!("failed reading metadata for {}: {error}", right.display()))?;
+    if left_metadata.len() != right_metadata.len() {
+        return Ok(false);
+    }
+
+    let mut left_file = std::fs::File::open(left)
+        .map_err(|error| format!("failed opening {}: {error}", left.display()))?;
+    let mut right_file = std::fs::File::open(right)
+        .map_err(|error| format!("failed opening {}: {error}", right.display()))?;
+    let mut left_buffer = [0_u8; 64 * 1024];
+    let mut right_buffer = [0_u8; 64 * 1024];
+    loop {
+        let left_read = left_file
+            .read(&mut left_buffer)
+            .map_err(|error| format!("failed reading {}: {error}", left.display()))?;
+        let right_read = right_file
+            .read(&mut right_buffer)
+            .map_err(|error| format!("failed reading {}: {error}", right.display()))?;
+        if left_read != right_read || left_buffer[..left_read] != right_buffer[..right_read] {
+            return Ok(false);
+        }
+        if left_read == 0 {
+            return Ok(true);
+        }
+    }
+}
+
+pub(crate) fn archive_audio_artifacts(
+    capture_dir: &Path,
+    output_dir: &Path,
+) -> Result<AudioArtifactPaths, String> {
+    std::fs::create_dir_all(output_dir).map_err(|error| {
+        format!(
+            "failed creating recording output dir {}: {error}",
+            output_dir.display()
+        )
+    })?;
+    copy_audio_artifacts(capture_dir, output_dir)?;
+
+    let existing = |file_name: &str| {
+        let path = output_dir.join(file_name);
+        path.exists().then(|| path.to_string_lossy().into_owned())
+    };
+    let mixed_audio_path = ["audio.mp3", "audio.wav", "audio.ogg", "audio.m4a"]
+        .into_iter()
+        .find_map(existing);
+
+    Ok(AudioArtifactPaths {
+        mixed_audio_path,
+        microphone_audio_path: existing(RAW_MIC_FILE),
+        processed_microphone_audio_path: existing(PROCESSED_MIC_FILE),
+        system_audio_path: existing(SYSTEM_AUDIO_FILE),
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum RecordingStemKind {
+    Microphone,
+    SystemAudio,
+}
+
+impl RecordingStemKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Microphone => "microphone",
+            Self::SystemAudio => "system-audio",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ValidatedWavStem {
+    pub kind: RecordingStemKind,
+    pub path: PathBuf,
+    pub channels: u16,
+    pub sample_rate: u32,
+    pub decoded_frames: u64,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RecordingStemValidation {
+    pub microphone: ValidatedWavStem,
+    pub system_audio: ValidatedWavStem,
+    pub duration_drift_ms: u64,
+    pub maximum_duration_drift_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RecordingStemValidationError {
+    Missing {
+        kind: RecordingStemKind,
+        path: Option<PathBuf>,
+    },
+    Undecodable {
+        kind: RecordingStemKind,
+        path: PathBuf,
+        message: String,
+    },
+    HeaderOnly {
+        kind: RecordingStemKind,
+        path: PathBuf,
+    },
+    TooShort {
+        kind: RecordingStemKind,
+        path: PathBuf,
+        duration_ms: u64,
+        minimum_duration_ms: u64,
+    },
+    DurationDrift {
+        microphone_duration_ms: u64,
+        system_audio_duration_ms: u64,
+        drift_ms: u64,
+        maximum_drift_ms: u64,
+    },
+}
+
+impl std::fmt::Display for RecordingStemValidationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing { kind, path: None } => {
+                write!(
+                    formatter,
+                    "recording is missing the {} WAV stem",
+                    kind.label()
+                )
+            }
+            Self::Missing {
+                kind,
+                path: Some(path),
+            } => write!(
+                formatter,
+                "recording {} WAV stem is missing at {}",
+                kind.label(),
+                path.display()
+            ),
+            Self::Undecodable {
+                kind,
+                path,
+                message,
+            } => write!(
+                formatter,
+                "recording {} WAV stem is undecodable at {}: {message}",
+                kind.label(),
+                path.display()
+            ),
+            Self::HeaderOnly { kind, path } => write!(
+                formatter,
+                "recording {} WAV stem has a WAV header but no audio frames: {}",
+                kind.label(),
+                path.display()
+            ),
+            Self::TooShort {
+                kind,
+                path,
+                duration_ms,
+                minimum_duration_ms,
+            } => write!(
+                formatter,
+                "recording {} WAV stem is only {duration_ms}ms at {}; minimum is {minimum_duration_ms}ms",
+                kind.label(),
+                path.display()
+            ),
+            Self::DurationDrift {
+                microphone_duration_ms,
+                system_audio_duration_ms,
+                drift_ms,
+                maximum_drift_ms,
+            } => write!(
+                formatter,
+                "recording stem durations differ by {drift_ms}ms (microphone={microphone_duration_ms}ms, system={system_audio_duration_ms}ms); maximum is {maximum_drift_ms}ms"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RecordingStemValidationError {}
+
+pub(crate) fn validate_recording_stems(
+    artifacts: &AudioArtifactPaths,
+) -> Result<RecordingStemValidation, RecordingStemValidationError> {
+    let microphone = artifact_wav_path(
+        RecordingStemKind::Microphone,
+        artifacts.microphone_audio_path.as_deref(),
+    )?;
+    let system_audio = artifact_wav_path(
+        RecordingStemKind::SystemAudio,
+        artifacts.system_audio_path.as_deref(),
+    )?;
+    let microphone = validate_wav_stem(RecordingStemKind::Microphone, &microphone)?;
+    let system_audio = validate_wav_stem(RecordingStemKind::SystemAudio, &system_audio)?;
+    let duration_drift_ms = microphone.duration_ms.abs_diff(system_audio.duration_ms);
+    if duration_drift_ms > MAX_RECORDING_STEM_DRIFT_MS {
+        return Err(RecordingStemValidationError::DurationDrift {
+            microphone_duration_ms: microphone.duration_ms,
+            system_audio_duration_ms: system_audio.duration_ms,
+            drift_ms: duration_drift_ms,
+            maximum_drift_ms: MAX_RECORDING_STEM_DRIFT_MS,
+        });
+    }
+
+    Ok(RecordingStemValidation {
+        microphone,
+        system_audio,
+        duration_drift_ms,
+        maximum_duration_drift_ms: MAX_RECORDING_STEM_DRIFT_MS,
+    })
+}
+
+fn artifact_wav_path(
+    kind: RecordingStemKind,
+    path: Option<&str>,
+) -> Result<PathBuf, RecordingStemValidationError> {
+    let Some(path) = path else {
+        return Err(RecordingStemValidationError::Missing { kind, path: None });
+    };
+    let path = PathBuf::from(path);
+    if !path.is_file() {
+        return Err(RecordingStemValidationError::Missing {
+            kind,
+            path: Some(path),
+        });
+    }
+    Ok(path)
+}
+
+fn validate_wav_stem(
+    kind: RecordingStemKind,
+    path: &Path,
+) -> Result<ValidatedWavStem, RecordingStemValidationError> {
+    let mut reader = hound::WavReader::open(path).map_err(|error| {
+        RecordingStemValidationError::Undecodable {
+            kind,
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        }
+    })?;
+    let spec = reader.spec();
+    if spec.channels == 0 || spec.sample_rate == 0 {
+        return Err(RecordingStemValidationError::Undecodable {
+            kind,
+            path: path.to_path_buf(),
+            message: format!(
+                "invalid WAV format (channels={}, sampleRate={})",
+                spec.channels, spec.sample_rate
+            ),
+        });
+    }
+
+    let mut decoded_samples = 0_u64;
+    match spec.sample_format {
+        hound::SampleFormat::Int => {
+            for sample in reader.samples::<i32>() {
+                sample.map_err(|error| RecordingStemValidationError::Undecodable {
+                    kind,
+                    path: path.to_path_buf(),
+                    message: error.to_string(),
+                })?;
+                decoded_samples = decoded_samples.saturating_add(1);
+            }
+        }
+        hound::SampleFormat::Float => {
+            for sample in reader.samples::<f32>() {
+                sample.map_err(|error| RecordingStemValidationError::Undecodable {
+                    kind,
+                    path: path.to_path_buf(),
+                    message: error.to_string(),
+                })?;
+                decoded_samples = decoded_samples.saturating_add(1);
+            }
+        }
+    }
+
+    if decoded_samples == 0 {
+        return Err(RecordingStemValidationError::HeaderOnly {
+            kind,
+            path: path.to_path_buf(),
+        });
+    }
+    if decoded_samples % u64::from(spec.channels) != 0 {
+        return Err(RecordingStemValidationError::Undecodable {
+            kind,
+            path: path.to_path_buf(),
+            message: format!(
+                "decoded sample count {decoded_samples} is not divisible by {} channels",
+                spec.channels
+            ),
+        });
+    }
+
+    let decoded_frames = decoded_samples / u64::from(spec.channels);
+    let duration_ms = decoded_frames.saturating_mul(1_000) / u64::from(spec.sample_rate);
+    if duration_ms < MIN_RECORDING_STEM_DURATION_MS {
+        return Err(RecordingStemValidationError::TooShort {
+            kind,
+            path: path.to_path_buf(),
+            duration_ms,
+            minimum_duration_ms: MIN_RECORDING_STEM_DURATION_MS,
+        });
+    }
+
+    Ok(ValidatedWavStem {
+        kind,
+        path: path.to_path_buf(),
+        channels: spec.channels,
+        sample_rate: spec.sample_rate,
+        decoded_frames,
+        duration_ms,
+    })
 }
 
 fn read_diarization_segments(
@@ -2404,12 +2774,198 @@ mod tests {
             std::fs::write(src.path().join(name), body).expect("write source artifact");
         }
 
-        copy_audio_artifacts(src.path(), dst.path()).expect("copy artifacts");
+        let artifacts = archive_audio_artifacts(src.path(), dst.path()).expect("copy artifacts");
 
         assert!(dst.path().join("audio.mp3").exists());
         assert!(dst.path().join("audio_mic.wav").exists());
         assert!(dst.path().join("audio_mic_processed.wav").exists());
         assert!(dst.path().join("audio_spk.wav").exists());
+        assert_eq!(
+            artifacts.microphone_audio_path.as_deref(),
+            Some(dst.path().join("audio_mic.wav").to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            artifacts.system_audio_path.as_deref(),
+            Some(dst.path().join("audio_spk.wav").to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn capture_stem_cleanup_removes_only_byte_identical_archived_duplicates() {
+        let capture = tempdir().expect("capture");
+        let output = tempdir().expect("output");
+        for (file_name, bytes) in [
+            (RAW_MIC_FILE, b"microphone".as_slice()),
+            (PROCESSED_MIC_FILE, b"processed".as_slice()),
+            (SYSTEM_AUDIO_FILE, b"system".as_slice()),
+        ] {
+            std::fs::write(capture.path().join(file_name), bytes).expect("capture stem");
+            std::fs::write(output.path().join(file_name), bytes).expect("output stem");
+        }
+
+        let removed =
+            remove_verified_capture_stem_duplicates(capture.path(), output.path()).expect("clean");
+
+        assert_eq!(removed, 3);
+        for file_name in [RAW_MIC_FILE, PROCESSED_MIC_FILE, SYSTEM_AUDIO_FILE] {
+            assert!(!capture.path().join(file_name).exists());
+            assert!(output.path().join(file_name).exists());
+        }
+    }
+
+    #[test]
+    fn capture_stem_cleanup_leaves_every_source_when_any_archive_differs() {
+        let capture = tempdir().expect("capture");
+        let output = tempdir().expect("output");
+        for file_name in [RAW_MIC_FILE, SYSTEM_AUDIO_FILE] {
+            std::fs::write(capture.path().join(file_name), b"source").expect("capture stem");
+            std::fs::write(output.path().join(file_name), b"source").expect("output stem");
+        }
+        std::fs::write(output.path().join(SYSTEM_AUDIO_FILE), b"different")
+            .expect("different archived stem");
+
+        let error = remove_verified_capture_stem_duplicates(capture.path(), output.path())
+            .expect_err("mismatch must fail closed");
+
+        assert!(error.contains("differs"));
+        assert!(capture.path().join(RAW_MIC_FILE).exists());
+        assert!(capture.path().join(SYSTEM_AUDIO_FILE).exists());
+    }
+
+    #[test]
+    fn recording_stem_validation_accepts_decodable_aligned_wavs() {
+        let dir = tempdir().expect("temp dir");
+        let microphone = dir.path().join(RAW_MIC_FILE);
+        let system_audio = dir.path().join(SYSTEM_AUDIO_FILE);
+        write_wav_millis(&microphone, 500);
+        write_wav_millis(&system_audio, 500);
+
+        let validation =
+            validate_recording_stems(&recording_artifacts(Some(&microphone), Some(&system_audio)))
+                .expect("valid recording stems");
+
+        assert_eq!(validation.microphone.duration_ms, 500);
+        assert_eq!(validation.microphone.decoded_frames, 500);
+        assert_eq!(validation.system_audio.duration_ms, 500);
+        assert_eq!(validation.system_audio.decoded_frames, 500);
+        assert_eq!(validation.duration_drift_ms, 0);
+        assert_eq!(validation.maximum_duration_drift_ms, 1_000);
+    }
+
+    #[test]
+    fn recording_stem_validation_rejects_each_missing_stem() {
+        let dir = tempdir().expect("temp dir");
+        let microphone = dir.path().join(RAW_MIC_FILE);
+        let system_audio = dir.path().join(SYSTEM_AUDIO_FILE);
+        write_wav_millis(&microphone, 500);
+        write_wav_millis(&system_audio, 500);
+
+        assert!(matches!(
+            validate_recording_stems(&recording_artifacts(None, Some(&system_audio))),
+            Err(RecordingStemValidationError::Missing {
+                kind: RecordingStemKind::Microphone,
+                path: None,
+            })
+        ));
+        assert!(matches!(
+            validate_recording_stems(&recording_artifacts(Some(&microphone), None)),
+            Err(RecordingStemValidationError::Missing {
+                kind: RecordingStemKind::SystemAudio,
+                path: None,
+            })
+        ));
+
+        let absent_system_audio = dir.path().join("absent-system.wav");
+        assert!(matches!(
+            validate_recording_stems(&recording_artifacts(
+                Some(&microphone),
+                Some(&absent_system_audio),
+            )),
+            Err(RecordingStemValidationError::Missing {
+                kind: RecordingStemKind::SystemAudio,
+                path: Some(path),
+            }) if path == absent_system_audio
+        ));
+    }
+
+    #[test]
+    fn recording_stem_validation_rejects_undecodable_system_wav() {
+        let dir = tempdir().expect("temp dir");
+        let microphone = dir.path().join(RAW_MIC_FILE);
+        let system_audio = dir.path().join(SYSTEM_AUDIO_FILE);
+        write_wav_millis(&microphone, 500);
+        std::fs::write(&system_audio, b"not a wav file").expect("write invalid WAV");
+
+        let error =
+            validate_recording_stems(&recording_artifacts(Some(&microphone), Some(&system_audio)))
+                .expect_err("undecodable system stem");
+
+        assert!(matches!(
+            error,
+            RecordingStemValidationError::Undecodable {
+                kind: RecordingStemKind::SystemAudio,
+                path,
+                ..
+            } if path == system_audio
+        ));
+    }
+
+    #[test]
+    fn recording_stem_validation_rejects_header_only_microphone_wav() {
+        let dir = tempdir().expect("temp dir");
+        let microphone = dir.path().join(RAW_MIC_FILE);
+        let system_audio = dir.path().join(SYSTEM_AUDIO_FILE);
+        write_header_only_wav(&microphone);
+        write_wav_millis(&system_audio, 500);
+
+        assert!(matches!(
+            validate_recording_stems(&recording_artifacts(
+                Some(&microphone),
+                Some(&system_audio),
+            )),
+            Err(RecordingStemValidationError::HeaderOnly {
+                kind: RecordingStemKind::Microphone,
+                path,
+            }) if path == microphone
+        ));
+    }
+
+    #[test]
+    fn recording_stem_validation_rejects_near_zero_duration_system_wav() {
+        let dir = tempdir().expect("temp dir");
+        let microphone = dir.path().join(RAW_MIC_FILE);
+        let system_audio = dir.path().join(SYSTEM_AUDIO_FILE);
+        write_wav_millis(&microphone, 500);
+        write_wav_millis(&system_audio, 100);
+
+        assert!(matches!(
+            validate_recording_stems(&recording_artifacts(Some(&microphone), Some(&system_audio),)),
+            Err(RecordingStemValidationError::TooShort {
+                kind: RecordingStemKind::SystemAudio,
+                duration_ms: 100,
+                minimum_duration_ms: 250,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn recording_stem_validation_rejects_excessive_duration_drift() {
+        let dir = tempdir().expect("temp dir");
+        let microphone = dir.path().join(RAW_MIC_FILE);
+        let system_audio = dir.path().join(SYSTEM_AUDIO_FILE);
+        write_wav_millis(&microphone, 500);
+        write_wav_millis(&system_audio, 2_000);
+
+        assert!(matches!(
+            validate_recording_stems(&recording_artifacts(Some(&microphone), Some(&system_audio),)),
+            Err(RecordingStemValidationError::DurationDrift {
+                microphone_duration_ms: 500,
+                system_audio_duration_ms: 2_000,
+                drift_ms: 1_500,
+                maximum_drift_ms: 1_000,
+            })
+        ));
     }
 
     #[test]
@@ -3027,6 +3583,41 @@ mod tests {
         writer.finalize().expect("finalize wav");
     }
 
+    fn recording_artifacts(
+        microphone: Option<&Path>,
+        system_audio: Option<&Path>,
+    ) -> AudioArtifactPaths {
+        AudioArtifactPaths {
+            microphone_audio_path: microphone.map(|path| path.to_string_lossy().into_owned()),
+            system_audio_path: system_audio.map(|path| path.to_string_lossy().into_owned()),
+            ..AudioArtifactPaths::default()
+        }
+    }
+
+    fn test_wav_spec() -> hound::WavSpec {
+        hound::WavSpec {
+            channels: 1,
+            sample_rate: 1_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        }
+    }
+
+    fn write_wav_millis(path: &Path, duration_ms: usize) {
+        let mut writer = hound::WavWriter::create(path, test_wav_spec()).expect("create WAV");
+        for _ in 0..duration_ms {
+            writer.write_sample(1_i16).expect("write WAV sample");
+        }
+        writer.finalize().expect("finalize WAV");
+    }
+
+    fn write_header_only_wav(path: &Path) {
+        hound::WavWriter::create(path, test_wav_spec())
+            .expect("create WAV")
+            .finalize()
+            .expect("finalize WAV");
+    }
+
     fn test_settings(
         recordings_dir: &Path,
         speaker_label_mode: SpeakerLabelMode,
@@ -3036,6 +3627,7 @@ mod tests {
             mlx_model: "mock-model".to_string(),
             mlx_fallback_model: "mock-model".to_string(),
             mic_device_id: None,
+            recording_mode: crate::recorder_settings::RecordingMode::RecordAndTranscribe,
             preserve_stems: false,
             speaker_label_mode,
             system_audio_authorized_hint: true,

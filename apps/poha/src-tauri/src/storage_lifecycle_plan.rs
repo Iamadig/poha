@@ -23,6 +23,8 @@ const CAPTURE_SCRATCH_AUDIO_FILES: &[&str] = &[
     "audio_mic_processed.wav",
     "audio_spk.wav",
 ];
+const STEM_AUDIO_FILES: &[&str] = &["audio_mic.wav", "audio_mic_processed.wav", "audio_spk.wav"];
+const PRESERVED_STEM_REASON: &str = "session preserveStems policy retains mic/system audio";
 
 pub(super) fn collect_actions(
     recordings_dir: &Path,
@@ -70,6 +72,10 @@ fn add_session_actions(
     ];
     let legacy_wav = session_dir.join("audio.wav");
     let metadata = read_json(&session_dir.join("session.json")).ok();
+    let preserve_stems = metadata
+        .as_ref()
+        .and_then(|value| preserve_stems_policy(value))
+        .unwrap_or(false);
     let capture_dir = metadata
         .as_ref()
         .and_then(|value| metadata_string(value, "capture_dir"))
@@ -176,6 +182,10 @@ fn add_session_actions(
     }
     if valid_mp3 {
         for stem in stems.iter().filter(|path| path.exists()) {
+            if preserve_stems {
+                skipped.push(skip(&session_id, stem, PRESERVED_STEM_REASON));
+                continue;
+            }
             if restored_artifacts.contains(&path_string(stem)) {
                 skipped.push(skip(
                     &session_id,
@@ -209,6 +219,7 @@ fn add_session_actions(
             &transcript,
             &session_id,
             &restored_artifacts,
+            preserve_stems,
             actions,
             skipped,
         )?;
@@ -234,6 +245,7 @@ fn add_capture_scratch_actions(
     transcript: &super::validation::TranscriptValidation,
     session_id: &str,
     restored_artifacts: &BTreeSet<String>,
+    preserve_stems: bool,
     actions: &mut Vec<StorageMaintenanceAction>,
     skipped: &mut Vec<StorageMaintenanceSkip>,
 ) -> Result<(), StorageError> {
@@ -250,6 +262,10 @@ fn add_capture_scratch_actions(
     for file_name in CAPTURE_SCRATCH_AUDIO_FILES {
         let scratch = capture_dir.join(file_name);
         if !scratch.exists() || same_path(&scratch, &session_dir.join(file_name)) {
+            continue;
+        }
+        if preserve_stems && is_stem_audio_file(file_name) {
+            skipped.push(skip(session_id, &scratch, PRESERVED_STEM_REASON));
             continue;
         }
         if restored_artifacts.contains(&path_string(&scratch)) {
@@ -281,6 +297,17 @@ fn add_capture_scratch_actions(
         }
     }
     Ok(())
+}
+
+fn preserve_stems_policy(metadata: &Value) -> Option<bool> {
+    metadata
+        .get("preserveStems")
+        .or_else(|| metadata.get("preserve_stems"))
+        .and_then(Value::as_bool)
+}
+
+fn is_stem_audio_file(file_name: &str) -> bool {
+    STEM_AUDIO_FILES.contains(&file_name)
 }
 
 fn capture_scratch_audio_exists(session_dir: &Path, capture_dir: &Path) -> bool {

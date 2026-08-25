@@ -20,7 +20,7 @@ use block2::RcBlock;
 use controller::{AppController, PermissionState, RecorderPhase};
 #[cfg(target_os = "macos")]
 use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio};
-use recorder_settings::{RecorderSettings, SpeakerLabelMode};
+use recorder_settings::{RecorderSettings, RecordingMode, SpeakerLabelMode};
 use serde::Serialize;
 use tauri::{Listener, Manager, RunEvent, WindowEvent};
 use tauri_plugin_audio_priority::AudioPriorityPluginExt;
@@ -30,7 +30,6 @@ use tauri_plugin_transcription::{CaptureLifecycleEvent, CaptureParams, ListenerP
 const CAPTURE_LIFECYCLE_EVENT_NAME: &str = "plugin:transcription:capture-lifecycle-event";
 const BATCH_CAPTURE_BASE_URL: &str = "http://localhost:50060/v1";
 const BATCH_CAPTURE_MODEL: &str = "cactus-parakeet-tdt-0.6b-v3-int8";
-
 #[derive(Default)]
 struct AppState {
     controller: Mutex<Option<AppController>>,
@@ -322,6 +321,17 @@ fn handle_menu_event(app: &tauri::AppHandle, menu_id: &str) {
                 tracing::error!("set_speaker_label_mode_failed: {error}");
             }
         }
+        controller::MENU_ID_RECORD_ONLY => {
+            if let Err(error) = set_recording_mode(app.clone(), RecordingMode::RecordOnly) {
+                tracing::error!("set_recording_mode_failed: {error}");
+            }
+        }
+        controller::MENU_ID_RECORD_AND_TRANSCRIBE => {
+            if let Err(error) = set_recording_mode(app.clone(), RecordingMode::RecordAndTranscribe)
+            {
+                tracing::error!("set_recording_mode_failed: {error}");
+            }
+        }
         controller::MENU_ID_TOGGLE_END_REMINDERS => {
             let enabled = get_controller(app)
                 .map(|controller| !controller.settings.meeting_end_reminders_enabled)
@@ -386,19 +396,17 @@ async fn request_quit(app: tauri::AppHandle) {
 }
 
 fn queue_quit_request(app: &tauri::AppHandle, detail: &str) -> Result<(), String> {
-    let mut controller = get_controller(app)?;
-    if controller.quit_requested {
-        return Ok(());
-    }
-
-    controller.quit_requested = true;
-    controller.status_detail = detail.to_string();
-    set_controller(app, controller)?;
+    update_controller(app, |controller| {
+        if !controller.quit_requested {
+            controller.quit_requested = true;
+            controller.status_detail = detail.to_string();
+        }
+    })?;
     refresh_tray(app);
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PermissionTarget {
     Microphone,
     SystemAudio,
@@ -505,7 +513,7 @@ fn open_permission_settings(permission: PermissionTarget) -> Result<(), String> 
 fn handle_capture_lifecycle_event(app: tauri::AppHandle, event: CaptureLifecycleEvent) {
     match event {
         CaptureLifecycleEvent::Started { session_id, .. } => {
-            if let Ok(mut controller) = get_controller(&app) {
+            let _ = update_controller(&app, |controller| {
                 if controller.active_session_id.as_deref() == Some(session_id.as_str()) {
                     controller.phase = RecorderPhase::Recording;
                     controller.status_detail = if controller.live_test_session_id.as_deref()
@@ -521,13 +529,12 @@ fn handle_capture_lifecycle_event(app: tauri::AppHandle, event: CaptureLifecycle
                     controller
                         .recording_end_reminder
                         .reset_for_recording(std::time::Instant::now());
-                    let _ = set_controller(&app, controller);
                 }
-            }
+            });
             refresh_tray(&app);
         }
         CaptureLifecycleEvent::Finalizing { session_id } => {
-            if let Ok(mut controller) = get_controller(&app) {
+            let _ = update_controller(&app, |controller| {
                 if controller.active_session_id.as_deref() == Some(session_id.as_str()) {
                     controller.phase = RecorderPhase::Finalizing;
                     controller.status_detail = if controller.live_test_session_id.as_deref()
@@ -537,9 +544,8 @@ fn handle_capture_lifecycle_event(app: tauri::AppHandle, event: CaptureLifecycle
                     } else {
                         "Finalizing capture".to_string()
                     };
-                    let _ = set_controller(&app, controller);
                 }
-            }
+            });
             refresh_tray(&app);
         }
         CaptureLifecycleEvent::Stopped {
@@ -548,90 +554,102 @@ fn handle_capture_lifecycle_event(app: tauri::AppHandle, event: CaptureLifecycle
             error,
             ..
         } => {
-            let mut live_handle = None;
-            let context = match get_controller(&app) {
-                Ok(mut controller) => {
-                    let was_active_session =
-                        controller.active_session_id.as_deref() == Some(session_id.as_str());
-                    let is_live_test =
-                        controller.live_test_session_id.as_deref() == Some(session_id.as_str());
-                    let live_test_mode =
-                        is_live_test.then_some(controller.live_test_mode).flatten();
-                    let output_dir = controller.settings.recordings_dir_path().join(&session_id);
-                    let capture_dir = controller
-                        .active_capture_dir
-                        .clone()
-                        .or_else(|| {
-                            audio_path
-                                .as_ref()
-                                .map(PathBuf::from)
-                                .and_then(|p| p.parent().map(ToOwned::to_owned))
-                        })
-                        .unwrap_or_else(|| {
-                            app.settings()
-                                .vault_base()
-                                .map(|base| {
-                                    base.join("sessions").join(&session_id).into_std_path_buf()
-                                })
-                                .unwrap_or_else(|_| PathBuf::from("sessions").join(&session_id))
-                        });
-                    let context = StoppedSessionContext {
-                        is_live_test,
-                        live_test_mode,
-                        output_dir,
-                        capture_dir,
-                        settings: controller.settings.clone(),
-                    };
-
-                    controller.background_transcription_count =
-                        controller.background_transcription_count.saturating_add(1);
-                    if was_active_session {
-                        controller.phase = RecorderPhase::Idle;
-                        controller.status_detail = if is_live_test {
-                            "Live test: transcribing".to_string()
-                        } else {
-                            "Transcribing in background".to_string()
-                        };
-                        controller.active_session_id = None;
-                        controller.recording_started_at = None;
-                        controller.active_capture_dir = None;
-                        controller.recording_end_reminder.clear();
-                        live_handle = match take_live_transcription_handle(&app) {
-                            Ok(handle) => handle,
-                            Err(error) => {
-                                tracing::warn!("live_transcription_take_failed: {error}");
-                                None
-                            }
-                        };
-                    } else if !controller.has_active_capture() {
-                        controller.phase = RecorderPhase::Idle;
-                        controller.status_detail = if is_live_test {
-                            "Live test: transcribing".to_string()
-                        } else {
-                            "Transcribing in background".to_string()
-                        };
-                    }
-                    let _ = set_controller(&app, controller);
-                    if live_test_mode == Some(live_test_diagnostics::LiveTestMode::Guided) {
-                        emit_audio_check_state(
-                            &app,
-                            audio_check_window::state(
-                                "transcribing",
-                                "Analyzing",
-                                "Transcribing the phrases and checking audio levels.",
-                                0.94,
-                                Some(session_id.clone()),
-                                Some(context.output_dir.to_string_lossy().into_owned()),
-                            ),
-                        );
-                    }
-                    Some(context)
+            let transition = update_controller(&app, |controller| {
+                if controller.active_session_id.as_deref() != Some(session_id.as_str()) {
+                    return Ok(None);
                 }
-                Err(error) => {
-                    tracing::error!("missing controller while handling stop: {error}");
+
+                let Some(output_dir) = controller.active_output_dir.clone() else {
+                    controller.clear_active_session();
+                    controller.phase = RecorderPhase::Error;
+                    controller.status_detail = "Recording context was lost".to_string();
+                    return Err("active recording output directory is missing".to_string());
+                };
+                let Some(capture_dir) = controller.active_capture_dir.clone() else {
+                    controller.clear_active_session();
+                    controller.phase = RecorderPhase::Error;
+                    controller.status_detail = "Recording context was lost".to_string();
+                    return Err("active recording capture directory is missing".to_string());
+                };
+                let Some(settings) = controller.active_settings_snapshot.clone() else {
+                    controller.clear_active_session();
+                    controller.phase = RecorderPhase::Error;
+                    controller.status_detail = "Recording context was lost".to_string();
+                    return Err("active recording settings snapshot is missing".to_string());
+                };
+
+                let is_live_test =
+                    controller.live_test_session_id.as_deref() == Some(session_id.as_str());
+                let live_test_mode = is_live_test.then_some(controller.live_test_mode).flatten();
+                let should_transcribe =
+                    is_live_test || settings.recording_mode == RecordingMode::RecordAndTranscribe;
+                let context = StoppedSessionContext {
+                    is_live_test,
+                    live_test_mode,
+                    output_dir,
+                    capture_dir,
+                    settings,
+                };
+
+                controller.background_transcription_count =
+                    controller.background_transcription_count.saturating_add(1);
+                if !should_transcribe {
+                    controller.phase = RecorderPhase::Finalizing;
+                    controller.status_detail = "Saving recording".to_string();
+                } else {
+                    controller.clear_active_session();
+                    controller.phase = RecorderPhase::Idle;
+                    controller.status_detail = if is_live_test {
+                        "Live test: transcribing".to_string()
+                    } else {
+                        "Transcribing in background".to_string()
+                    };
+                }
+                Ok(Some(context))
+            });
+
+            let context = match transition {
+                Ok(Ok(Some(context))) => Some(context),
+                Ok(Ok(None)) => {
+                    tracing::warn!(
+                        session_id,
+                        "ignoring stopped event for unknown or already-finalized session"
+                    );
+                    None
+                }
+                Ok(Err(error)) | Err(error) => {
+                    tracing::error!(session_id, "cannot finalize stopped session: {error}");
                     None
                 }
             };
+
+            let live_handle = if context.is_some() {
+                match take_live_transcription_handle(&app) {
+                    Ok(handle) => handle,
+                    Err(error) => {
+                        tracing::warn!("live_transcription_take_failed: {error}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            if let Some(context) = context.as_ref() {
+                if context.live_test_mode == Some(live_test_diagnostics::LiveTestMode::Guided) {
+                    emit_audio_check_state(
+                        &app,
+                        audio_check_window::state(
+                            "transcribing",
+                            "Analyzing",
+                            "Transcribing the phrases and checking audio levels.",
+                            0.94,
+                            Some(session_id.clone()),
+                            Some(context.output_dir.to_string_lossy().into_owned()),
+                        ),
+                    );
+                }
+            }
             refresh_tray(&app);
 
             if let Some(context) = context {
@@ -670,21 +688,44 @@ async fn process_stopped_session(
     let capture_error_for_report = capture_error.clone();
 
     let mut manifest = manifest::read_manifest(&output_dir).unwrap_or_else(|_| {
-        manifest::SessionManifest::recording(
+        manifest::SessionManifest::recording_with_policy(
             session_id.clone(),
             capture_dir.to_string_lossy().into_owned(),
+            settings.recording_mode,
+            settings.preserve_stems,
         )
     });
-    manifest.set_status("transcribing");
-    if let Some(err) = capture_error {
-        manifest.mark_error(err);
-    }
+    let should_transcribe =
+        is_live_test || manifest.recording_mode == RecordingMode::RecordAndTranscribe;
+    manifest.set_status(if should_transcribe {
+        "transcribing"
+    } else {
+        "finalizing"
+    });
     let _ = manifest::write_manifest(&output_dir, &manifest);
 
     if let Some(handle) = live_handle
         && let Err(error) = handle.stop().await
     {
         tracing::warn!("live_transcription_stop_failed: {error}");
+    }
+
+    if !should_transcribe {
+        finalize_record_only_session(
+            app,
+            session_id,
+            output_dir,
+            capture_dir,
+            capture_error,
+            manifest,
+        )
+        .await;
+        return;
+    }
+
+    if let Some(err) = capture_error {
+        manifest.mark_error(err);
+        let _ = manifest::write_manifest(&output_dir, &manifest);
     }
 
     let input = transcription::ProcessInput {
@@ -697,19 +738,15 @@ async fn process_stopped_session(
 
     let result =
         tauri::async_runtime::spawn_blocking(move || transcription::process_session(input)).await;
-    let mut controller = match get_controller(&app) {
-        Ok(controller) => controller,
-        Err(error) => {
-            tracing::error!("missing controller after transcription: {error}");
-            return;
-        }
-    };
+    let mut completion_last_transcript_path = None;
+    let mut completion_onboarding = false;
 
-    match result {
+    let (completion_phase, completion_detail) = match result {
         Ok(Ok(artifacts)) => {
             let audio_path = artifacts
                 .audio_output_path
                 .unwrap_or_else(|| output_dir.join("audio.mp3"));
+            manifest.set_audio_artifacts(artifacts.audio_artifacts.clone());
             manifest.mark_done(
                 audio_path.to_string_lossy().into_owned(),
                 artifacts
@@ -737,12 +774,12 @@ async fn process_stopped_session(
                     None,
                 ) {
                     Ok(report) if report.passed() => {
-                        controller.last_transcript_path = Some(report.report_markdown_path());
+                        completion_last_transcript_path = Some(report.report_markdown_path());
                         live_test_report = Some(report);
                         None
                     }
                     Ok(report) => {
-                        controller.last_transcript_path = Some(report.report_markdown_path());
+                        completion_last_transcript_path = Some(report.report_markdown_path());
                         let failure = report.failure_summary();
                         live_test_report = Some(report);
                         Some(failure)
@@ -767,13 +804,10 @@ async fn process_stopped_session(
             }
 
             if is_live_test && live_test_failure.is_none() {
-                controller.settings.onboarding_completed = true;
-                if let Err(error) = recorder_settings::save(&app, &controller.settings) {
-                    tracing::warn!("failed saving onboarding completion: {error}");
-                }
+                completion_onboarding = true;
             }
             if !is_live_test {
-                controller.last_transcript_path = Some(artifacts.transcript_markdown_path.clone());
+                completion_last_transcript_path = Some(artifacts.transcript_markdown_path.clone());
             }
             if live_test_mode == Some(live_test_diagnostics::LiveTestMode::Guided) {
                 let title = if live_test_failure.is_some() {
@@ -795,9 +829,7 @@ async fn process_stopped_session(
                     tracing::warn!("audio_check_complete_state_failed: {error}");
                 }
             }
-            finish_background_transcription(
-                &mut controller,
-                &session_id,
+            (
                 if live_test_failure.is_some() {
                     RecorderPhase::Error
                 } else {
@@ -810,7 +842,7 @@ async fn process_stopped_session(
                 } else {
                     "Transcript ready".to_string()
                 },
-            );
+            )
         }
         Ok(Err(error)) => {
             manifest.mark_error(error.clone());
@@ -826,7 +858,7 @@ async fn process_stopped_session(
                     Some(error.clone()),
                 ) {
                     Ok(report) => {
-                        controller.last_transcript_path = Some(report.report_markdown_path());
+                        completion_last_transcript_path = Some(report.report_markdown_path());
                         live_test_report = Some(report);
                     }
                     Err(error) => tracing::warn!("live_test_report_failed: {error}"),
@@ -844,17 +876,13 @@ async fn process_stopped_session(
                 }
             }
             reindex_after_transcription(&settings);
-            finish_background_transcription(
-                &mut controller,
-                &session_id,
-                RecorderPhase::Error,
-                if is_live_test {
-                    "Live test failed".to_string()
-                } else {
-                    transcription_error_detail(&error)
-                },
-            );
+            let detail = if is_live_test {
+                "Live test failed".to_string()
+            } else {
+                transcription_error_detail(&error)
+            };
             tracing::error!("transcription_failed: {error}");
+            (RecorderPhase::Error, detail)
         }
         Err(join_error) => {
             let message = format!("transcription task join failed: {join_error}");
@@ -871,7 +899,7 @@ async fn process_stopped_session(
                     Some(message.clone()),
                 ) {
                     Ok(report) => {
-                        controller.last_transcript_path = Some(report.report_markdown_path());
+                        completion_last_transcript_path = Some(report.report_markdown_path());
                         live_test_report = Some(report);
                     }
                     Err(error) => tracing::warn!("live_test_report_failed: {error}"),
@@ -889,22 +917,32 @@ async fn process_stopped_session(
                 }
             }
             reindex_after_transcription(&settings);
-            finish_background_transcription(
-                &mut controller,
-                &session_id,
+            tracing::error!("{message}");
+            (
                 RecorderPhase::Error,
                 if is_live_test {
                     "Live test crashed".to_string()
                 } else {
                     "Transcription task crashed".to_string()
                 },
-            );
-            tracing::error!("{message}");
+            )
         }
-    }
+    };
 
-    let should_exit = controller.quit_requested && !controller.has_active_work();
-    let _ = set_controller(&app, controller);
+    let should_exit = match complete_background_session(
+        &app,
+        &session_id,
+        completion_phase,
+        completion_detail,
+        completion_last_transcript_path,
+        completion_onboarding,
+    ) {
+        Ok(should_exit) => should_exit,
+        Err(error) => {
+            tracing::error!("missing controller after transcription: {error}");
+            return;
+        }
+    };
 
     if should_exit {
         app.exit(0);
@@ -912,6 +950,128 @@ async fn process_stopped_session(
     }
 
     refresh_tray(&app);
+}
+
+async fn finalize_record_only_session(
+    app: tauri::AppHandle,
+    session_id: String,
+    output_dir: PathBuf,
+    capture_dir: PathBuf,
+    capture_error: Option<String>,
+    mut manifest: manifest::SessionManifest,
+) {
+    let archive_output_dir = output_dir.clone();
+    let archive_capture_dir = capture_dir.clone();
+    let archive_result = tauri::async_runtime::spawn_blocking(move || {
+        transcription::archive_audio_artifacts(&archive_capture_dir, &archive_output_dir).map(
+            |artifacts| {
+                let validation = transcription::validate_recording_stems(&artifacts)
+                    .map_err(|error| error.to_string());
+                (artifacts, validation)
+            },
+        )
+    })
+    .await;
+
+    let (phase, detail) = match archive_result {
+        Ok(Ok((artifacts, validation))) => {
+            manifest.set_audio_artifacts(artifacts.clone());
+
+            if let Some(error) = capture_error {
+                manifest.mark_error(format!(
+                    "capture failed; available audio was preserved: {error}"
+                ));
+                (
+                    RecorderPhase::Error,
+                    "Capture failed; available audio was preserved".to_string(),
+                )
+            } else if let Err(error) = validation {
+                manifest.mark_error(format!("recording integrity check failed: {error}"));
+                (
+                    RecorderPhase::Error,
+                    format!("Recording integrity check failed: {error}"),
+                )
+            } else {
+                manifest.mark_recorded(artifacts);
+                (
+                    RecorderPhase::Done,
+                    "Recording saved (microphone + system audio)".to_string(),
+                )
+            }
+        }
+        Ok(Err(error)) => {
+            manifest.mark_error(error.clone());
+            tracing::error!("recording_archive_failed: {error}");
+            (RecorderPhase::Error, "Failed to save recording".to_string())
+        }
+        Err(join_error) => {
+            let error = format!("recording archive task join failed: {join_error}");
+            manifest.mark_error(error.clone());
+            tracing::error!("{error}");
+            (
+                RecorderPhase::Error,
+                "Recording save task crashed".to_string(),
+            )
+        }
+    };
+
+    let (phase, detail, manifest_committed) = match manifest::write_manifest(&output_dir, &manifest)
+    {
+        Ok(()) => (phase, detail, true),
+        Err(error) => {
+            tracing::error!("failed committing record-only manifest: {error}");
+            (
+                RecorderPhase::Error,
+                "Recording saved, but metadata commit failed".to_string(),
+                false,
+            )
+        }
+    };
+
+    if phase == RecorderPhase::Done && manifest_committed {
+        let cleanup_capture_dir = capture_dir.clone();
+        let cleanup_output_dir = output_dir.clone();
+        match tauri::async_runtime::spawn_blocking(move || {
+            transcription::remove_verified_capture_stem_duplicates(
+                &cleanup_capture_dir,
+                &cleanup_output_dir,
+            )
+        })
+        .await
+        {
+            Ok(Ok(removed)) => {
+                tracing::info!(
+                    removed,
+                    session_id,
+                    "cleaned verified capture stem duplicates"
+                )
+            }
+            Ok(Err(error)) => tracing::warn!(
+                session_id,
+                "verified capture stem cleanup was skipped: {error}"
+            ),
+            Err(error) => tracing::warn!(
+                session_id,
+                "verified capture stem cleanup task failed: {error}"
+            ),
+        }
+    }
+
+    let should_exit = match update_controller(&app, |controller| {
+        finish_background_transcription(controller, &session_id, phase, detail);
+        controller.quit_requested && !controller.has_active_work()
+    }) {
+        Ok(should_exit) => should_exit,
+        Err(error) => {
+            tracing::error!("missing controller after recording archive: {error}");
+            return;
+        }
+    };
+    if should_exit {
+        app.exit(0);
+    } else {
+        refresh_tray(&app);
+    }
 }
 
 fn write_live_test_report(
@@ -1082,6 +1242,46 @@ pub fn recover_crashed_session(
     let settings_path = request
         .settings_path
         .unwrap_or_else(recorder_settings::default_settings_file);
+
+    if manifest.recording_mode == RecordingMode::RecordOnly {
+        manifest.set_status("finalizing");
+        manifest::write_manifest(&output_dir, &manifest)?;
+        let artifacts = match transcription::archive_audio_artifacts(&capture_dir, &output_dir) {
+            Ok(artifacts) => artifacts,
+            Err(error) => {
+                manifest.mark_error(error.clone());
+                manifest::write_manifest(&output_dir, &manifest)?;
+                return Err(error);
+            }
+        };
+        if let Err(error) = transcription::validate_recording_stems(&artifacts) {
+            let error = format!("recording integrity check failed: {error}");
+            manifest.set_audio_artifacts(artifacts);
+            manifest.mark_error(error.clone());
+            manifest::write_manifest(&output_dir, &manifest)?;
+            return Err(error);
+        }
+        manifest.mark_recorded(artifacts);
+        manifest::write_manifest(&output_dir, &manifest)?;
+        if let Err(error) =
+            transcription::remove_verified_capture_stem_duplicates(&capture_dir, &output_dir)
+        {
+            tracing::warn!(
+                session_id = request.session_id,
+                "recovered capture stem cleanup was skipped: {error}"
+            );
+        }
+        return Ok(RecoverSessionResult {
+            id: manifest.id,
+            status: manifest.status,
+            audio_path: manifest.audio_path,
+            transcript_markdown_path: None,
+            transcript_json_path: None,
+            capture_dir: capture_dir.to_string_lossy().into_owned(),
+            output_dir: output_dir.to_string_lossy().into_owned(),
+        });
+    }
+
     let settings =
         recorder_settings::load_from_file(&settings_path, request.recordings_dir.clone())?;
 
@@ -1101,6 +1301,7 @@ pub fn recover_crashed_session(
             let audio_path = artifacts
                 .audio_output_path
                 .unwrap_or_else(|| output_dir.join("audio.mp3"));
+            manifest.set_audio_artifacts(artifacts.audio_artifacts.clone());
             manifest.mark_done(
                 audio_path.to_string_lossy().into_owned(),
                 artifacts
@@ -1164,13 +1365,18 @@ fn finish_background_transcription(
         controller.live_test_mode = None;
     }
 
+    if controller.active_session_id.as_deref() == Some(session_id)
+        && controller.phase == RecorderPhase::Finalizing
+    {
+        controller.clear_active_session();
+        controller.phase = RecorderPhase::Idle;
+    }
+
     if controller.has_active_capture() {
         return;
     }
 
-    controller.active_session_id = None;
-    controller.recording_started_at = None;
-    controller.active_capture_dir = None;
+    controller.clear_active_session();
     if controller.background_transcription_count > 0 {
         controller.phase = RecorderPhase::Idle;
         controller.status_detail = controller
@@ -1182,23 +1388,46 @@ fn finish_background_transcription(
     }
 }
 
+fn complete_background_session(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    completed_phase: RecorderPhase,
+    completed_detail: String,
+    last_transcript_path: Option<PathBuf>,
+    onboarding_completed: bool,
+) -> Result<bool, String> {
+    let (should_exit, settings_to_save) = update_controller(app, |controller| {
+        if let Some(path) = last_transcript_path {
+            controller.last_transcript_path = Some(path);
+        }
+        if onboarding_completed {
+            controller.settings.onboarding_completed = true;
+        }
+        finish_background_transcription(controller, session_id, completed_phase, completed_detail);
+        (
+            controller.quit_requested && !controller.has_active_work(),
+            onboarding_completed.then(|| controller.settings.clone()),
+        )
+    })?;
+
+    if let Some(settings) = settings_to_save
+        && let Err(error) = recorder_settings::save(app, &settings)
+    {
+        tracing::warn!("failed saving onboarding completion: {error}");
+    }
+    Ok(should_exit)
+}
+
 pub async fn start_recording(app: tauri::AppHandle) -> Result<String, String> {
-    start_recording_inner(app, false, "Capture active").await
+    start_recording_inner(app, false, "Capture active", false).await
 }
 
 async fn start_recording_inner(
     app: tauri::AppHandle,
     onboarding: bool,
     status_detail: &str,
+    force_transcription: bool,
 ) -> Result<String, String> {
-    let mut controller = get_controller(&app)?;
-    if !controller.can_start_recording() {
-        return Err(format!(
-            "cannot start while status is {}",
-            controller.phase.status_text()
-        ));
-    }
-
     let session_id = uuid::Uuid::new_v4().to_string();
     let vault_base = app
         .settings()
@@ -1208,36 +1437,59 @@ async fn start_recording_inner(
         .join("sessions")
         .join(&session_id)
         .into_std_path_buf();
-    let output_dir = controller.settings.recordings_dir_path().join(&session_id);
-    let settings = controller.settings.clone();
-    let mic_device_name =
-        selected_microphone_name(&app, controller.settings.mic_device_id.as_deref());
+    let reservation = update_controller(&app, |controller| {
+        if !controller.can_start_recording() {
+            return Err(format!(
+                "cannot start while status is {}",
+                controller.phase.status_text()
+            ));
+        }
+        let mut settings = controller.settings.clone();
+        if force_transcription {
+            settings.recording_mode = RecordingMode::RecordAndTranscribe;
+        }
+        let output_dir = settings.recordings_dir_path().join(&session_id);
+        let mic_device_id = settings.mic_device_id.clone();
 
-    if let Some(mic_device_id) = controller.settings.mic_device_id.clone() {
-        app.audio_priority()
-            .set_default_input_device(&mic_device_id)
-            .map_err(|e| format!("failed setting microphone {mic_device_id}: {e}"))?;
-    }
+        controller.phase = RecorderPhase::Recording;
+        controller.status_detail = status_detail.to_string();
+        controller.quit_requested = false;
+        controller.active_session_id = Some(session_id.clone());
+        controller.recording_started_at = Some(std::time::Instant::now());
+        controller.active_capture_dir = Some(capture_dir.clone());
+        controller.active_output_dir = Some(output_dir.clone());
+        controller.active_settings_snapshot = Some(settings.clone());
+        controller
+            .recording_end_reminder
+            .reset_for_recording(std::time::Instant::now());
 
-    manifest::write_manifest(
-        &output_dir,
-        &manifest::SessionManifest::recording(
-            session_id.clone(),
-            capture_dir.to_string_lossy().into_owned(),
-        ),
-    )?;
-
-    controller.phase = RecorderPhase::Recording;
-    controller.status_detail = status_detail.to_string();
-    controller.quit_requested = false;
-    controller.active_session_id = Some(session_id.clone());
-    controller.recording_started_at = Some(std::time::Instant::now());
-    controller.active_capture_dir = Some(capture_dir.clone());
-    controller
-        .recording_end_reminder
-        .reset_for_recording(std::time::Instant::now());
-    set_controller(&app, controller)?;
+        Ok((settings, output_dir, mic_device_id))
+    })??;
+    let (settings, output_dir, mic_device_id) = reservation;
     refresh_tray(&app);
+
+    let mic_device_name = selected_microphone_name(&app, mic_device_id.as_deref());
+    let prepare_result = (|| -> Result<(), String> {
+        if let Some(mic_device_id) = mic_device_id {
+            app.audio_priority()
+                .set_default_input_device(&mic_device_id)
+                .map_err(|e| format!("failed setting microphone {mic_device_id}: {e}"))?;
+        }
+
+        manifest::write_manifest(
+            &output_dir,
+            &manifest::SessionManifest::recording_with_policy(
+                session_id.clone(),
+                capture_dir.to_string_lossy().into_owned(),
+                settings.recording_mode,
+                settings.preserve_stems,
+            ),
+        )
+    })();
+    if let Err(error) = prepare_result {
+        rollback_recording_start(&app, &session_id, "Failed to prepare recording")?;
+        return Err(error);
+    }
 
     let params = CaptureParams {
         session_id: session_id.clone(),
@@ -1257,34 +1509,48 @@ async fn start_recording_inner(
     };
 
     if let Err(error) = app.listener().start_capture(params).await {
-        let mut controller = get_controller(&app)?;
-        controller.phase = RecorderPhase::Error;
-        controller.status_detail = "Failed to start capture".to_string();
-        controller.active_session_id = None;
-        controller.recording_started_at = None;
-        controller.active_capture_dir = None;
-        controller.recording_end_reminder.clear();
-        set_controller(&app, controller)?;
+        rollback_recording_start(&app, &session_id, "Failed to start capture")?;
         if let Ok(mut manifest) = manifest::read_manifest(&output_dir) {
             manifest.mark_error(error.to_string());
             let _ = manifest::write_manifest(&output_dir, &manifest);
         }
-        refresh_tray(&app);
         return Err(error.to_string());
     }
 
-    set_live_transcription_handle(
-        &app,
-        transcription::spawn_live_transcription(transcription::ProcessInput {
-            session_id: session_id.clone(),
-            capture_dir,
-            output_dir,
-            audio_path_from_event: None,
-            settings,
-        }),
-    )?;
+    if settings.recording_mode == RecordingMode::RecordAndTranscribe {
+        set_live_transcription_handle(
+            &app,
+            transcription::spawn_live_transcription(transcription::ProcessInput {
+                session_id: session_id.clone(),
+                capture_dir,
+                output_dir,
+                audio_path_from_event: None,
+                settings,
+            }),
+        )?;
+    }
 
     Ok(session_id)
+}
+
+fn rollback_recording_start(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    detail: &str,
+) -> Result<(), String> {
+    let rolled_back = update_controller(app, |controller| {
+        if controller.active_session_id.as_deref() != Some(session_id) {
+            return false;
+        }
+        controller.clear_active_session();
+        controller.phase = RecorderPhase::Error;
+        controller.status_detail = detail.to_string();
+        true
+    })?;
+    if rolled_back {
+        refresh_tray(app);
+    }
+    Ok(())
 }
 
 fn selected_microphone_name(app: &tauri::AppHandle, mic_device_id: Option<&str>) -> Option<String> {
@@ -1375,27 +1641,34 @@ async fn run_live_test_with_mode(
         return Err("system audio permission missing".to_string());
     }
 
-    let session_id = start_recording_inner(app.clone(), false, "Live test: starting").await?;
-    let mut controller = get_controller(&app)?;
-    let capture_dir = controller
-        .active_capture_dir
-        .clone()
-        .ok_or_else(|| "live test capture dir missing".to_string())?;
-    let output_dir = controller.settings.recordings_dir_path().join(&session_id);
-    controller.live_test_session_id = Some(session_id.clone());
-    controller.live_test_mode = Some(mode);
-    controller.status_detail = match mode {
-        live_test_diagnostics::LiveTestMode::Automatic => {
-            "Live test: playing diagnostic audio".to_string()
+    let session_id = start_recording_inner(app.clone(), false, "Live test: starting", true).await?;
+    let (capture_dir, output_dir) = update_controller(&app, |controller| {
+        if controller.active_session_id.as_deref() != Some(session_id.as_str()) {
+            return Err("live test session is no longer active".to_string());
         }
-        live_test_diagnostics::LiveTestMode::Guided => {
-            format!(
-                "Audio check: say '{}'",
-                live_test_diagnostics::GUIDED_MIC_PHRASE
-            )
-        }
-    };
-    set_controller(&app, controller)?;
+        let capture_dir = controller
+            .active_capture_dir
+            .clone()
+            .ok_or_else(|| "live test capture dir missing".to_string())?;
+        let output_dir = controller
+            .active_output_dir
+            .clone()
+            .ok_or_else(|| "live test output dir missing".to_string())?;
+        controller.live_test_session_id = Some(session_id.clone());
+        controller.live_test_mode = Some(mode);
+        controller.status_detail = match mode {
+            live_test_diagnostics::LiveTestMode::Automatic => {
+                "Live test: playing diagnostic audio".to_string()
+            }
+            live_test_diagnostics::LiveTestMode::Guided => {
+                format!(
+                    "Audio check: say '{}'",
+                    live_test_diagnostics::GUIDED_MIC_PHRASE
+                )
+            }
+        };
+        Ok((capture_dir, output_dir))
+    })??;
     refresh_tray(&app);
 
     if guided {
@@ -1431,10 +1704,10 @@ fn write_live_test_permission_report(
         microphone_permission,
         system_audio_permission,
     )?;
-    let mut controller = controller.clone();
-    controller.last_transcript_path = Some(report.report_markdown_path());
-    controller.status_detail = format!("Live test failed: {}", report.failure_summary());
-    set_controller(app, controller)?;
+    update_controller(app, |controller| {
+        controller.last_transcript_path = Some(report.report_markdown_path());
+        controller.status_detail = format!("Live test failed: {}", report.failure_summary());
+    })?;
     refresh_tray(app);
     Ok(report)
 }
@@ -1681,24 +1954,26 @@ pub(crate) async fn stop_recording_inner(
     app: tauri::AppHandle,
     reason: StopRecordingReason,
 ) -> Result<(), String> {
-    let mut controller = get_controller(&app)?;
-    if !controller.can_stop_recording() {
-        return Err(format!(
-            "cannot stop while status is {}",
-            controller.phase.status_text()
-        ));
-    }
+    update_controller(&app, |controller| {
+        if !controller.can_stop_recording() {
+            return Err(format!(
+                "cannot stop while status is {}",
+                controller.phase.status_text()
+            ));
+        }
 
-    controller.phase = RecorderPhase::Finalizing;
-    controller.status_detail =
-        if controller.live_test_session_id.as_deref() == controller.active_session_id.as_deref() {
+        controller.phase = RecorderPhase::Finalizing;
+        controller.status_detail = if controller.live_test_session_id.as_deref()
+            == controller.active_session_id.as_deref()
+        {
             "Live test: stopping".to_string()
         } else if reason == StopRecordingReason::AutoQuiet {
             "Auto-stopping after quiet period".to_string()
         } else {
             "Stopping capture".to_string()
         };
-    set_controller(&app, controller)?;
+        Ok(())
+    })??;
     refresh_tray(&app);
 
     app.listener().stop_capture().await;
@@ -1784,42 +2059,76 @@ pub fn set_recordings_folder(app: tauri::AppHandle, path: String) -> Result<(), 
     std::fs::create_dir_all(&target)
         .map_err(|e| format!("failed creating recordings dir {}: {e}", target.display()))?;
 
-    let mut controller = get_controller(&app)?;
-    controller.settings.recordings_dir = target.to_string_lossy().into_owned();
-    recorder_settings::save(&app, &controller.settings)?;
-    controller.last_transcript_path =
-        recorder_settings::latest_transcript_path(&controller.settings.recordings_dir_path());
-    set_controller(&app, controller)?;
+    let settings = update_controller(&app, |controller| {
+        if controller.has_active_capture() {
+            return Err("cannot change recordings folder during an active recording".to_string());
+        }
+        controller.settings.recordings_dir = target.to_string_lossy().into_owned();
+        controller.last_transcript_path =
+            recorder_settings::latest_transcript_path(&controller.settings.recordings_dir_path());
+        Ok(controller.settings.clone())
+    })??;
+    recorder_settings::save(&app, &settings)?;
     refresh_tray(&app);
     Ok(())
 }
 
 pub fn set_microphone_device(app: tauri::AppHandle, device_id: String) -> Result<(), String> {
-    app.audio_priority()
-        .set_default_input_device(&device_id)
-        .map_err(|e| format!("failed setting microphone device {device_id}: {e}"))?;
-
-    let mut controller = get_controller(&app)?;
-    controller.settings.mic_device_id = Some(device_id);
-    recorder_settings::save(&app, &controller.settings)?;
-    set_controller(&app, controller)?;
+    let previous_device = update_controller(&app, |controller| {
+        if controller.has_active_capture() {
+            return Err("cannot change microphone during an active recording".to_string());
+        }
+        let previous = controller.settings.mic_device_id.replace(device_id.clone());
+        Ok(previous)
+    })??;
+    if let Err(error) = app.audio_priority().set_default_input_device(&device_id) {
+        let _ = update_controller(&app, |controller| {
+            if controller.settings.mic_device_id.as_deref() == Some(device_id.as_str()) {
+                controller.settings.mic_device_id = previous_device;
+            }
+        });
+        return Err(format!(
+            "failed setting microphone device {device_id}: {error}"
+        ));
+    }
+    let settings = update_controller(&app, |controller| controller.settings.clone())?;
+    recorder_settings::save(&app, &settings)?;
     refresh_tray(&app);
     Ok(())
 }
 
 pub fn set_speaker_label_mode(app: tauri::AppHandle, mode: SpeakerLabelMode) -> Result<(), String> {
-    let mut controller = get_controller(&app)?;
-    if controller.has_active_capture() {
-        return Err(format!(
-            "cannot change speaker labels while status is {}",
-            controller.phase.status_text()
-        ));
-    }
+    let settings = update_controller(&app, |controller| {
+        if controller.has_active_capture() {
+            return Err(format!(
+                "cannot change speaker labels while status is {}",
+                controller.phase.status_text()
+            ));
+        }
 
-    controller.settings.speaker_label_mode = mode;
-    controller.status_detail = format!("Speaker labels: {}", mode.menu_label());
-    recorder_settings::save(&app, &controller.settings)?;
-    set_controller(&app, controller)?;
+        controller.settings.speaker_label_mode = mode;
+        controller.status_detail = format!("Speaker labels: {}", mode.menu_label());
+        Ok(controller.settings.clone())
+    })??;
+    recorder_settings::save(&app, &settings)?;
+    refresh_tray(&app);
+    Ok(())
+}
+
+pub fn set_recording_mode(app: tauri::AppHandle, mode: RecordingMode) -> Result<(), String> {
+    let settings = update_controller(&app, |controller| {
+        if !controller.can_start_recording() {
+            return Err("recording mode cannot change during an active capture".to_string());
+        }
+        controller.settings.recording_mode = mode;
+        controller.status_detail = match mode {
+            RecordingMode::RecordOnly => "Future recordings will keep audio only",
+            RecordingMode::RecordAndTranscribe => "Future recordings will transcribe locally",
+        }
+        .to_string();
+        Ok(controller.settings.clone())
+    })??;
+    recorder_settings::save(&app, &settings)?;
     refresh_tray(&app);
     Ok(())
 }
@@ -1899,9 +2208,9 @@ fn take_live_transcription_handle(
 }
 
 fn set_status_detail(app: &tauri::AppHandle, detail: &str) -> Result<(), String> {
-    let mut controller = get_controller(app)?;
-    controller.status_detail = detail.to_string();
-    set_controller(app, controller)?;
+    update_controller(app, |controller| {
+        controller.status_detail = detail.to_string();
+    })?;
     refresh_tray(app);
     Ok(())
 }
@@ -1949,43 +2258,48 @@ async fn refresh_permission_statuses(app: tauri::AppHandle, probe_system_audio: 
         );
     }
 
-    let mut controller = match get_controller(&app) {
-        Ok(controller) => controller,
+    let update = update_controller(&app, |controller| {
+        let mut changed = false;
+        let mut settings_to_save = None;
+
+        if let Some(next_hint) = system_audio_hint
+            && next_hint != controller.settings.system_audio_authorized_hint
+        {
+            controller.settings.system_audio_authorized_hint = next_hint;
+            changed = true;
+            settings_to_save = Some(controller.settings.clone());
+        }
+
+        let permission_changed = controller.permission_snapshot.microphone != microphone
+            || controller.permission_snapshot.system_audio != system_audio;
+        if permission_changed {
+            controller.permission_snapshot.microphone = microphone;
+            controller.permission_snapshot.system_audio = system_audio;
+            changed = true;
+        }
+        (changed, permission_changed, settings_to_save)
+    });
+    let (changed, permission_changed, settings_to_save) = match update {
+        Ok(update) => update,
         Err(error) => {
             tracing::error!("permissions refresh: latest controller unavailable: {error}");
             return;
         }
     };
-    let mut changed = false;
 
-    if let Some(next_hint) = system_audio_hint
-        && next_hint != controller.settings.system_audio_authorized_hint
+    if let Some(settings) = settings_to_save
+        && let Err(error) = recorder_settings::save(&app, &settings)
     {
-        controller.settings.system_audio_authorized_hint = next_hint;
-        changed = true;
-        if let Err(error) = recorder_settings::save(&app, &controller.settings) {
-            tracing::warn!("permissions refresh: failed persisting system audio hint: {error}");
-        }
+        tracing::warn!("permissions refresh: failed persisting system audio hint: {error}");
     }
-
-    let was_same = controller.permission_snapshot.microphone == microphone
-        && controller.permission_snapshot.system_audio == system_audio;
-    if was_same {
-        if !changed {
-            return;
-        }
-    } else {
+    if permission_changed {
         tracing::info!(
             microphone = ?microphone,
             system_audio = ?system_audio,
             "permissions_snapshot_updated"
         );
-        controller.permission_snapshot.microphone = microphone;
-        controller.permission_snapshot.system_audio = system_audio;
     }
-
-    if let Err(error) = set_controller(&app, controller) {
-        tracing::error!("permissions refresh: failed to store state: {error}");
+    if !changed {
         return;
     }
     refresh_tray(&app);
@@ -2135,7 +2449,7 @@ fn canonical_existing_path(path: &PathBuf) -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::Instant;
 
     use super::{
@@ -2206,6 +2520,8 @@ mod tests {
         controller.active_session_id = Some("new-recording".to_string());
         controller.recording_started_at = Some(Instant::now());
         controller.active_capture_dir = Some(PathBuf::from("/tmp/new-recording"));
+        controller.active_output_dir = Some(PathBuf::from("/tmp/output/new-recording"));
+        controller.active_settings_snapshot = Some(controller.settings.clone());
         controller.background_transcription_count = 1;
         controller.status_detail = "Capture active".to_string();
 
@@ -2223,6 +2539,41 @@ mod tests {
         );
         assert_eq!(controller.status_detail, "Capture active");
         assert_eq!(controller.background_transcription_count, 0);
+        assert_eq!(
+            controller.active_output_dir.as_deref(),
+            Some(Path::new("/tmp/output/new-recording"))
+        );
+        assert!(controller.active_settings_snapshot.is_some());
+    }
+
+    #[test]
+    fn record_only_completion_clears_its_finalizing_context() {
+        let mut controller = AppController::new(
+            RecorderSettings::default_with_recordings_dir(PathBuf::from("/tmp/poha-tests")),
+            None,
+        );
+        controller.phase = RecorderPhase::Finalizing;
+        controller.active_session_id = Some("saved-recording".to_string());
+        controller.recording_started_at = Some(Instant::now());
+        controller.active_capture_dir = Some(PathBuf::from("/tmp/capture/saved-recording"));
+        controller.active_output_dir = Some(PathBuf::from("/tmp/output/saved-recording"));
+        controller.active_settings_snapshot = Some(controller.settings.clone());
+        controller.background_transcription_count = 1;
+
+        finish_background_transcription(
+            &mut controller,
+            "saved-recording",
+            RecorderPhase::Done,
+            "Recording saved".to_string(),
+        );
+
+        assert_eq!(controller.phase, RecorderPhase::Done);
+        assert_eq!(controller.status_detail, "Recording saved");
+        assert_eq!(controller.background_transcription_count, 0);
+        assert!(controller.active_session_id.is_none());
+        assert!(controller.active_capture_dir.is_none());
+        assert!(controller.active_output_dir.is_none());
+        assert!(controller.active_settings_snapshot.is_none());
     }
 
     #[test]
