@@ -8,6 +8,7 @@ use tauri::{AppHandle, Result};
 use tauri_plugin_audio_priority::AudioPriorityPluginExt;
 
 use crate::live_test_diagnostics::LiveTestMode;
+use crate::meeting_detection::AutomationMode;
 use crate::recorder_settings::{RecorderSettings, SpeakerLabelMode};
 use crate::recording_end_reminder::RecordingEndReminderState;
 
@@ -27,6 +28,13 @@ pub const MENU_ID_PERMISSION_SYSTEM: &str = "poha_permission_system";
 pub const MENU_ID_SPEAKER_FAST: &str = "poha_speaker_fast";
 pub const MENU_ID_SPEAKER_ME_CALL: &str = "poha_speaker_me_call";
 pub const MENU_ID_TOGGLE_END_REMINDERS: &str = "poha_toggle_end_reminders";
+pub const MENU_ID_AUTOMATION_OFF: &str = "poha_automation_off";
+pub const MENU_ID_AUTOMATION_ASK: &str = "poha_automation_ask";
+pub const MENU_ID_AUTOMATION_AUTO_SCHEDULED: &str = "poha_automation_auto_scheduled";
+pub const MENU_ID_CALENDAR_ACCESS: &str = "poha_calendar_access";
+pub const MENU_ID_TOGGLE_CALENDAR: &str = "poha_toggle_calendar";
+pub const MENU_ID_ACCEPT_DETECTED_MEETING: &str = "poha_accept_detected_meeting";
+pub const MENU_ID_DISMISS_DETECTED_MEETING: &str = "poha_dismiss_detected_meeting";
 pub const MENU_ID_QUIT: &str = "poha_quit";
 pub const MENU_ID_REFRESH: &str = "poha_refresh";
 
@@ -85,6 +93,7 @@ pub enum PermissionState {
 pub struct PermissionSnapshot {
     pub microphone: PermissionState,
     pub system_audio: PermissionState,
+    pub calendar: PermissionState,
 }
 
 impl Default for PermissionSnapshot {
@@ -92,6 +101,7 @@ impl Default for PermissionSnapshot {
         Self {
             microphone: PermissionState::Missing,
             system_audio: PermissionState::Missing,
+            calendar: PermissionState::Missing,
         }
     }
 }
@@ -110,6 +120,7 @@ pub struct AppController {
     pub last_transcript_path: Option<PathBuf>,
     pub permission_snapshot: PermissionSnapshot,
     pub recording_end_reminder: RecordingEndReminderState,
+    pub pending_meeting_prompt_title: Option<String>,
     pub settings: RecorderSettings,
 }
 
@@ -133,6 +144,7 @@ impl AppController {
             last_transcript_path,
             permission_snapshot: PermissionSnapshot::default(),
             recording_end_reminder: RecordingEndReminderState::default(),
+            pending_meeting_prompt_title: None,
             settings,
         }
     }
@@ -238,6 +250,7 @@ fn build_menu(app: &AppHandle, controller: &AppController) -> Result<Menu<tauri:
                 true,
                 None::<&str>,
             )?,
+            &build_meeting_automation_menu(app, controller)?,
             &build_permissions_menu(app, controller)?,
             &build_troubleshooting_menu(app, controller)?,
             &PredefinedMenuItem::separator(app)?,
@@ -292,9 +305,91 @@ fn build_permissions_menu(
                 true,
                 None::<&str>,
             )?,
+            &MenuItem::with_id(
+                app,
+                MENU_ID_CALENDAR_ACCESS,
+                permission_label("Calendar", controller.permission_snapshot.calendar),
+                true,
+                None::<&str>,
+            )?,
         ],
     )?;
     Ok(MenuItemKind::Submenu(menu))
+}
+
+fn build_meeting_automation_menu(
+    app: &AppHandle,
+    controller: &AppController,
+) -> Result<MenuItemKind<tauri::Wry>> {
+    let current = controller.settings.meeting_automation_mode;
+    let menu = Submenu::new(app, "Meeting Detection", true)?;
+    if let Some(title) = controller.pending_meeting_prompt_title.as_deref() {
+        menu.append(&MenuItem::with_id(
+            app,
+            MENU_ID_ACCEPT_DETECTED_MEETING,
+            format!("Start: {title}"),
+            controller.can_start_recording(),
+            None::<&str>,
+        )?)?;
+        menu.append(&MenuItem::with_id(
+            app,
+            MENU_ID_DISMISS_DETECTED_MEETING,
+            "Not Now",
+            true,
+            None::<&str>,
+        )?)?;
+        menu.append(&PredefinedMenuItem::separator(app)?)?;
+    }
+    menu.append(&MenuItem::with_id(
+        app,
+        MENU_ID_AUTOMATION_OFF,
+        automation_mode_label("Off", current, AutomationMode::Off),
+        true,
+        None::<&str>,
+    )?)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        MENU_ID_AUTOMATION_ASK,
+        automation_mode_label("Ask Before Recording", current, AutomationMode::Ask),
+        true,
+        None::<&str>,
+    )?)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        MENU_ID_AUTOMATION_AUTO_SCHEDULED,
+        automation_mode_label(
+            "Auto-start Scheduled Native Calls",
+            current,
+            AutomationMode::AutoScheduled,
+        ),
+        true,
+        None::<&str>,
+    )?)?;
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        MENU_ID_TOGGLE_CALENDAR,
+        calendar_matching_label(controller.settings.calendar_integration_enabled),
+        true,
+        None::<&str>,
+    )?)?;
+    Ok(MenuItemKind::Submenu(menu))
+}
+
+fn automation_mode_label(name: &str, current: AutomationMode, mode: AutomationMode) -> String {
+    if current == mode {
+        format!("✓ {name}")
+    } else {
+        name.to_string()
+    }
+}
+
+fn calendar_matching_label(enabled: bool) -> &'static str {
+    if enabled {
+        "✓ Use Calendar Matching"
+    } else {
+        "Use Calendar Matching…"
+    }
 }
 
 fn permission_label(name: &str, state: PermissionState) -> String {

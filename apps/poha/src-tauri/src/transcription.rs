@@ -3041,6 +3041,8 @@ mod tests {
             system_audio_authorized_hint: true,
             onboarding_completed: true,
             meeting_end_reminders_enabled: true,
+            meeting_automation_mode: crate::meeting_detection::AutomationMode::Off,
+            calendar_integration_enabled: false,
         }
     }
 

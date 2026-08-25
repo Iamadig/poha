@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tauri_plugin_settings::SettingsPluginExt;
 
+use crate::meeting_detection::AutomationMode;
+
 const DEFAULT_MLX_MODEL: &str = "mlx-community/whisper-turbo";
 const DEFAULT_MLX_FALLBACK_MODEL: &str = "mlx-community/whisper-turbo";
 const LEGACY_PREVIOUS_DEFAULT_MLX_MODEL: &str = "mlx-community/whisper-large-v3-mlx-8bit";
@@ -49,6 +51,10 @@ pub struct RecorderSettings {
     pub onboarding_completed: bool,
     #[serde(default = "default_meeting_end_reminders_enabled")]
     pub meeting_end_reminders_enabled: bool,
+    #[serde(default)]
+    pub meeting_automation_mode: AutomationMode,
+    #[serde(default)]
+    pub calendar_integration_enabled: bool,
 }
 
 impl RecorderSettings {
@@ -63,6 +69,8 @@ impl RecorderSettings {
             system_audio_authorized_hint: false,
             onboarding_completed: false,
             meeting_end_reminders_enabled: true,
+            meeting_automation_mode: AutomationMode::Off,
+            calendar_integration_enabled: false,
         }
     }
 
@@ -209,6 +217,8 @@ fn missing_persisted_defaults(settings: &serde_json::Value) -> bool {
         || settings.get("systemAudioAuthorizedHint").is_none()
         || settings.get("onboardingCompleted").is_none()
         || settings.get("meetingEndRemindersEnabled").is_none()
+        || settings.get("meetingAutomationMode").is_none()
+        || settings.get("calendarIntegrationEnabled").is_none()
 }
 
 fn default_meeting_end_reminders_enabled() -> bool {
@@ -231,6 +241,8 @@ mod tests {
             system_audio_authorized_hint: false,
             onboarding_completed: false,
             meeting_end_reminders_enabled: true,
+            meeting_automation_mode: AutomationMode::Off,
+            calendar_integration_enabled: false,
         };
         let (migrated, changed) = migrate_settings(legacy);
         assert!(changed);
@@ -250,6 +262,8 @@ mod tests {
             system_audio_authorized_hint: false,
             onboarding_completed: false,
             meeting_end_reminders_enabled: true,
+            meeting_automation_mode: AutomationMode::Off,
+            calendar_integration_enabled: false,
         };
         let (migrated, changed) = migrate_settings(previous);
         assert!(changed);
@@ -269,6 +283,8 @@ mod tests {
             system_audio_authorized_hint: false,
             onboarding_completed: false,
             meeting_end_reminders_enabled: true,
+            meeting_automation_mode: AutomationMode::Off,
+            calendar_integration_enabled: false,
         };
         let (migrated, changed) = migrate_settings(broken);
         assert!(changed);
@@ -288,6 +304,8 @@ mod tests {
             system_audio_authorized_hint: false,
             onboarding_completed: false,
             meeting_end_reminders_enabled: true,
+            meeting_automation_mode: AutomationMode::Off,
+            calendar_integration_enabled: false,
         };
         let (migrated, changed) = migrate_settings(custom.clone());
         assert!(!changed);
@@ -306,6 +324,8 @@ mod tests {
             system_audio_authorized_hint: false,
             onboarding_completed: false,
             meeting_end_reminders_enabled: true,
+            meeting_automation_mode: AutomationMode::Off,
+            calendar_integration_enabled: false,
         };
         let (migrated, changed) = migrate_settings(legacy);
         assert!(changed);
@@ -338,6 +358,21 @@ mod tests {
 
         let parsed: RecorderSettings = serde_json::from_str(json).expect("parse settings");
         assert!(!parsed.onboarding_completed);
+    }
+
+    #[test]
+    fn meeting_automation_defaults_off_without_calendar_access() {
+        let json = r#"{
+            "recordingsDir":"/tmp/recordings",
+            "mlxModel":"mlx-community/whisper-turbo",
+            "mlxFallbackModel":"mlx-community/whisper-turbo",
+            "micDeviceId":null,
+            "preserveStems":false
+        }"#;
+
+        let parsed: RecorderSettings = serde_json::from_str(json).expect("parse settings");
+        assert_eq!(parsed.meeting_automation_mode, AutomationMode::Off);
+        assert!(!parsed.calendar_integration_enabled);
     }
 
     #[test]

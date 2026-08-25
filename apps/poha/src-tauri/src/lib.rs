@@ -1,10 +1,15 @@
 mod audio_check_window;
+pub mod calendar_source;
 mod codex_enrichment;
 mod commands;
 mod controller;
+pub mod eventkit_calendar;
 mod live_test_diagnostics;
 mod manifest;
+mod meeting_automation_runtime;
+pub mod meeting_detection;
 pub mod meeting_store;
+pub mod native_meeting_activity;
 mod recorder_settings;
 mod recording_end_reminder;
 mod recording_end_reminder_runtime;
@@ -18,6 +23,7 @@ use std::sync::Mutex;
 #[cfg(target_os = "macos")]
 use block2::RcBlock;
 use controller::{AppController, PermissionState, RecorderPhase};
+use meeting_detection::{AutomationMode, MeetingEvidence};
 #[cfg(target_os = "macos")]
 use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio};
 use recorder_settings::{RecorderSettings, SpeakerLabelMode};
@@ -34,8 +40,10 @@ const BATCH_CAPTURE_MODEL: &str = "cactus-parakeet-tdt-0.6b-v3-int8";
 #[derive(Default)]
 struct AppState {
     controller: Mutex<Option<AppController>>,
+    settings_persistence: Mutex<()>,
     live_transcription: Mutex<Option<transcription::LiveTranscriptionHandle>>,
     audio_check_state: Mutex<Option<audio_check_window::AudioCheckState>>,
+    meeting_automation: Mutex<meeting_automation_runtime::MeetingAutomationRuntime>,
 }
 
 #[derive(Clone)]
@@ -129,6 +137,7 @@ pub async fn main() {
             init_controller(&app_handle)?;
             install_menu_handler(&app_handle);
             install_capture_lifecycle_listener(&app_handle);
+            meeting_automation_runtime::install(&app_handle);
             recording_end_reminder_runtime::install(&app_handle);
             install_recording_title_ticker(&app_handle);
             install_permission_status_ticker(&app_handle);
@@ -330,6 +339,87 @@ fn handle_menu_event(app: &tauri::AppHandle, menu_id: &str) {
                 tracing::error!("set_meeting_end_reminders_enabled_failed: {error}");
             }
         }
+        controller::MENU_ID_AUTOMATION_OFF => {
+            if let Err(error) = set_meeting_automation_mode(app.clone(), AutomationMode::Off) {
+                tracing::error!("set_meeting_automation_mode_failed: {error}");
+            }
+        }
+        controller::MENU_ID_AUTOMATION_ASK => {
+            if let Err(error) = set_meeting_automation_mode(app.clone(), AutomationMode::Ask) {
+                tracing::error!("set_meeting_automation_mode_failed: {error}");
+            }
+        }
+        controller::MENU_ID_AUTOMATION_AUTO_SCHEDULED => {
+            if let Err(error) =
+                set_meeting_automation_mode(app.clone(), AutomationMode::AutoScheduled)
+            {
+                tracing::error!("set_meeting_automation_mode_failed: {error}");
+                return;
+            }
+            let controller = match get_controller(app) {
+                Ok(controller) => controller,
+                Err(error) => {
+                    tracing::error!("calendar_access_controller_failed: {error}");
+                    return;
+                }
+            };
+            if !controller.settings.calendar_integration_enabled {
+                let expected_generation = match meeting_automation_runtime::calendar_generation(app)
+                {
+                    Ok(generation) => generation,
+                    Err(error) => {
+                        tracing::error!("calendar_generation_failed: {error}");
+                        return;
+                    }
+                };
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = meeting_automation_runtime::enable_calendar_for_auto_mode(
+                        app,
+                        expected_generation,
+                    )
+                    .await
+                    {
+                        tracing::warn!("calendar_access_failed: {error}");
+                    }
+                });
+            }
+        }
+        controller::MENU_ID_TOGGLE_CALENDAR => {
+            let calendar_enabled = get_controller(app)
+                .map(|controller| controller.settings.calendar_integration_enabled)
+                .unwrap_or(false);
+            if calendar_enabled {
+                if let Err(error) = meeting_automation_runtime::disable_calendar(app) {
+                    tracing::error!("disable_calendar_failed: {error}");
+                }
+            } else {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) =
+                        meeting_automation_runtime::enable_calendar_from_user_action(app).await
+                    {
+                        tracing::warn!("calendar_access_failed: {error}");
+                    }
+                });
+            }
+        }
+        controller::MENU_ID_CALENDAR_ACCESS => {
+            open_permission(app.clone(), PermissionTarget::Calendar);
+        }
+        controller::MENU_ID_ACCEPT_DETECTED_MEETING => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = meeting_automation_runtime::accept_pending_prompt(app).await {
+                    tracing::warn!("detected_meeting_accept_failed: {error}");
+                }
+            });
+        }
+        controller::MENU_ID_DISMISS_DETECTED_MEETING => {
+            if let Err(error) = meeting_automation_runtime::dismiss_pending_prompt(app) {
+                tracing::warn!("detected_meeting_dismiss_failed: {error}");
+            }
+        }
         controller::MENU_ID_QUIT => {
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
@@ -398,14 +488,26 @@ fn queue_quit_request(app: &tauri::AppHandle, detail: &str) -> Result<(), String
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PermissionTarget {
     Microphone,
     SystemAudio,
+    Calendar,
 }
 
 fn open_permission(app: tauri::AppHandle, permission: PermissionTarget) {
     tauri::async_runtime::spawn(async move {
+        if permission == PermissionTarget::Calendar {
+            if let Err(error) =
+                meeting_automation_runtime::enable_calendar_from_user_action(app.clone()).await
+            {
+                tracing::warn!("calendar permission request failed: {error}");
+                if let Err(settings_error) = open_permission_settings(permission) {
+                    tracing::error!("failed opening calendar settings: {settings_error}");
+                }
+            }
+            return;
+        }
         if let Err(error) = request_permission(&app, permission) {
             tracing::error!("failed requesting permission {:?}: {error}", permission);
         }
@@ -433,6 +535,7 @@ fn request_permission(app: &tauri::AppHandle, permission: PermissionTarget) -> R
                 // Best effort: probing speaker capture triggers Audio Capture prompt when needed.
                 let _ = probe_system_audio_state(app);
             }
+            PermissionTarget::Calendar => {}
         }
     }
 
@@ -466,6 +569,7 @@ fn open_permission_settings(permission: PermissionTarget) -> Result<(), String> 
         let anchor = match permission {
             PermissionTarget::Microphone => "Privacy_Microphone",
             PermissionTarget::SystemAudio => "Privacy_AudioCapture",
+            PermissionTarget::Calendar => "Privacy_Calendars",
         };
 
         let urls = [
@@ -704,6 +808,7 @@ async fn process_stopped_session(
             return;
         }
     };
+    let mut onboarding_completed = false;
 
     match result {
         Ok(Ok(artifacts)) => {
@@ -768,9 +873,7 @@ async fn process_stopped_session(
 
             if is_live_test && live_test_failure.is_none() {
                 controller.settings.onboarding_completed = true;
-                if let Err(error) = recorder_settings::save(&app, &controller.settings) {
-                    tracing::warn!("failed saving onboarding completion: {error}");
-                }
+                onboarding_completed = true;
             }
             if !is_live_test {
                 controller.last_transcript_path = Some(artifacts.transcript_markdown_path.clone());
@@ -905,6 +1008,14 @@ async fn process_stopped_session(
 
     let should_exit = controller.quit_requested && !controller.has_active_work();
     let _ = set_controller(&app, controller);
+    if onboarding_completed
+        && let Err(error) = update_and_save_settings(&app, |controller| {
+            controller.settings.onboarding_completed = true;
+            Ok(())
+        })
+    {
+        tracing::warn!("failed saving onboarding completion: {error}");
+    }
 
     if should_exit {
         app.exit(0);
@@ -1183,22 +1294,42 @@ fn finish_background_transcription(
 }
 
 pub async fn start_recording(app: tauri::AppHandle) -> Result<String, String> {
-    start_recording_inner(app, false, "Capture active").await
+    let session_id =
+        start_recording_inner(app.clone(), false, "Capture active", None, false).await?;
+    if let Err(error) = meeting_automation_runtime::recording_started(&app) {
+        tracing::warn!(%error, "capture started but meeting automation bookkeeping failed");
+    }
+    Ok(session_id)
+}
+
+pub(crate) async fn start_recording_for_meeting(
+    app: tauri::AppHandle,
+    _evidence: MeetingEvidence,
+    status_detail: &str,
+    required_mode: AutomationMode,
+    require_calendar_match: bool,
+) -> Result<String, String> {
+    let session_id = start_recording_inner(
+        app.clone(),
+        false,
+        status_detail,
+        Some(required_mode),
+        require_calendar_match,
+    )
+    .await?;
+    if let Err(error) = meeting_automation_runtime::recording_started(&app) {
+        tracing::warn!(%error, "capture started but meeting automation bookkeeping failed");
+    }
+    Ok(session_id)
 }
 
 async fn start_recording_inner(
     app: tauri::AppHandle,
     onboarding: bool,
     status_detail: &str,
+    required_automation_mode: Option<AutomationMode>,
+    require_calendar_match: bool,
 ) -> Result<String, String> {
-    let mut controller = get_controller(&app)?;
-    if !controller.can_start_recording() {
-        return Err(format!(
-            "cannot start while status is {}",
-            controller.phase.status_text()
-        ));
-    }
-
     let session_id = uuid::Uuid::new_v4().to_string();
     let vault_base = app
         .settings()
@@ -1208,36 +1339,60 @@ async fn start_recording_inner(
         .join("sessions")
         .join(&session_id)
         .into_std_path_buf();
-    let output_dir = controller.settings.recordings_dir_path().join(&session_id);
-    let settings = controller.settings.clone();
-    let mic_device_name =
-        selected_microphone_name(&app, controller.settings.mic_device_id.as_deref());
+    let (settings, output_dir, mic_device_id) = update_controller(&app, |controller| {
+        if !controller.can_start_recording() {
+            return Err(format!(
+                "cannot start while status is {}",
+                controller.phase.status_text()
+            ));
+        }
+        if let Some(required_mode) = required_automation_mode
+            && controller.settings.meeting_automation_mode != required_mode
+        {
+            return Err("meeting automation mode changed before recording started".to_string());
+        }
+        if require_calendar_match
+            && (required_automation_mode != Some(AutomationMode::AutoScheduled)
+                || !controller.settings.calendar_integration_enabled)
+        {
+            return Err("calendar matching was disabled before recording started".to_string());
+        }
 
-    if let Some(mic_device_id) = controller.settings.mic_device_id.clone() {
-        app.audio_priority()
-            .set_default_input_device(&mic_device_id)
-            .map_err(|e| format!("failed setting microphone {mic_device_id}: {e}"))?;
-    }
-
-    manifest::write_manifest(
-        &output_dir,
-        &manifest::SessionManifest::recording(
-            session_id.clone(),
-            capture_dir.to_string_lossy().into_owned(),
-        ),
-    )?;
-
-    controller.phase = RecorderPhase::Recording;
-    controller.status_detail = status_detail.to_string();
-    controller.quit_requested = false;
-    controller.active_session_id = Some(session_id.clone());
-    controller.recording_started_at = Some(std::time::Instant::now());
-    controller.active_capture_dir = Some(capture_dir.clone());
-    controller
-        .recording_end_reminder
-        .reset_for_recording(std::time::Instant::now());
-    set_controller(&app, controller)?;
+        let settings = controller.settings.clone();
+        let output_dir = settings.recordings_dir_path().join(&session_id);
+        let mic_device_id = settings.mic_device_id.clone();
+        controller.phase = RecorderPhase::Recording;
+        controller.status_detail = status_detail.to_string();
+        controller.quit_requested = false;
+        controller.active_session_id = Some(session_id.clone());
+        controller.recording_started_at = Some(std::time::Instant::now());
+        controller.active_capture_dir = Some(capture_dir.clone());
+        controller
+            .recording_end_reminder
+            .reset_for_recording(std::time::Instant::now());
+        Ok((settings, output_dir, mic_device_id))
+    })??;
     refresh_tray(&app);
+
+    let mic_device_name = selected_microphone_name(&app, mic_device_id.as_deref());
+    let prepare_result = (|| -> Result<(), String> {
+        if let Some(mic_device_id) = mic_device_id {
+            app.audio_priority()
+                .set_default_input_device(&mic_device_id)
+                .map_err(|e| format!("failed setting microphone {mic_device_id}: {e}"))?;
+        }
+        manifest::write_manifest(
+            &output_dir,
+            &manifest::SessionManifest::recording(
+                session_id.clone(),
+                capture_dir.to_string_lossy().into_owned(),
+            ),
+        )
+    })();
+    if let Err(error) = prepare_result {
+        rollback_recording_start(&app, &session_id, "Failed to prepare recording")?;
+        return Err(error);
+    }
 
     let params = CaptureParams {
         session_id: session_id.clone(),
@@ -1257,19 +1412,11 @@ async fn start_recording_inner(
     };
 
     if let Err(error) = app.listener().start_capture(params).await {
-        let mut controller = get_controller(&app)?;
-        controller.phase = RecorderPhase::Error;
-        controller.status_detail = "Failed to start capture".to_string();
-        controller.active_session_id = None;
-        controller.recording_started_at = None;
-        controller.active_capture_dir = None;
-        controller.recording_end_reminder.clear();
-        set_controller(&app, controller)?;
+        rollback_recording_start(&app, &session_id, "Failed to start capture")?;
         if let Ok(mut manifest) = manifest::read_manifest(&output_dir) {
             manifest.mark_error(error.to_string());
             let _ = manifest::write_manifest(&output_dir, &manifest);
         }
-        refresh_tray(&app);
         return Err(error.to_string());
     }
 
@@ -1285,6 +1432,29 @@ async fn start_recording_inner(
     )?;
 
     Ok(session_id)
+}
+
+fn rollback_recording_start(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    detail: &str,
+) -> Result<(), String> {
+    let rolled_back = update_controller(app, |controller| {
+        if controller.active_session_id.as_deref() != Some(session_id) {
+            return false;
+        }
+        controller.phase = RecorderPhase::Error;
+        controller.status_detail = detail.to_string();
+        controller.active_session_id = None;
+        controller.recording_started_at = None;
+        controller.active_capture_dir = None;
+        controller.recording_end_reminder.clear();
+        true
+    })?;
+    if rolled_back {
+        refresh_tray(app);
+    }
+    Ok(())
 }
 
 fn selected_microphone_name(app: &tauri::AppHandle, mic_device_id: Option<&str>) -> Option<String> {
@@ -1375,7 +1545,8 @@ async fn run_live_test_with_mode(
         return Err("system audio permission missing".to_string());
     }
 
-    let session_id = start_recording_inner(app.clone(), false, "Live test: starting").await?;
+    let session_id =
+        start_recording_inner(app.clone(), false, "Live test: starting", None, false).await?;
     let mut controller = get_controller(&app)?;
     let capture_dir = controller
         .active_capture_dir
@@ -1681,24 +1852,29 @@ pub(crate) async fn stop_recording_inner(
     app: tauri::AppHandle,
     reason: StopRecordingReason,
 ) -> Result<(), String> {
-    let mut controller = get_controller(&app)?;
-    if !controller.can_stop_recording() {
-        return Err(format!(
-            "cannot stop while status is {}",
-            controller.phase.status_text()
-        ));
-    }
+    update_controller(&app, |controller| {
+        if !controller.can_stop_recording() {
+            return Err(format!(
+                "cannot stop while status is {}",
+                controller.phase.status_text()
+            ));
+        }
 
-    controller.phase = RecorderPhase::Finalizing;
-    controller.status_detail =
-        if controller.live_test_session_id.as_deref() == controller.active_session_id.as_deref() {
+        controller.phase = RecorderPhase::Finalizing;
+        controller.status_detail = if controller.live_test_session_id.as_deref()
+            == controller.active_session_id.as_deref()
+        {
             "Live test: stopping".to_string()
         } else if reason == StopRecordingReason::AutoQuiet {
             "Auto-stopping after quiet period".to_string()
         } else {
             "Stopping capture".to_string()
         };
-    set_controller(&app, controller)?;
+        Ok(())
+    })??;
+    if let Err(error) = meeting_automation_runtime::recording_stopping(&app) {
+        tracing::warn!(%error, "capture is stopping but meeting automation bookkeeping failed");
+    }
     refresh_tray(&app);
 
     app.listener().stop_capture().await;
@@ -1784,12 +1960,12 @@ pub fn set_recordings_folder(app: tauri::AppHandle, path: String) -> Result<(), 
     std::fs::create_dir_all(&target)
         .map_err(|e| format!("failed creating recordings dir {}: {e}", target.display()))?;
 
-    let mut controller = get_controller(&app)?;
-    controller.settings.recordings_dir = target.to_string_lossy().into_owned();
-    recorder_settings::save(&app, &controller.settings)?;
-    controller.last_transcript_path =
-        recorder_settings::latest_transcript_path(&controller.settings.recordings_dir_path());
-    set_controller(&app, controller)?;
+    update_and_save_settings(&app, |controller| {
+        controller.settings.recordings_dir = target.to_string_lossy().into_owned();
+        controller.last_transcript_path =
+            recorder_settings::latest_transcript_path(&controller.settings.recordings_dir_path());
+        Ok(())
+    })?;
     refresh_tray(&app);
     Ok(())
 }
@@ -1799,27 +1975,27 @@ pub fn set_microphone_device(app: tauri::AppHandle, device_id: String) -> Result
         .set_default_input_device(&device_id)
         .map_err(|e| format!("failed setting microphone device {device_id}: {e}"))?;
 
-    let mut controller = get_controller(&app)?;
-    controller.settings.mic_device_id = Some(device_id);
-    recorder_settings::save(&app, &controller.settings)?;
-    set_controller(&app, controller)?;
+    update_and_save_settings(&app, |controller| {
+        controller.settings.mic_device_id = Some(device_id);
+        Ok(())
+    })?;
     refresh_tray(&app);
     Ok(())
 }
 
 pub fn set_speaker_label_mode(app: tauri::AppHandle, mode: SpeakerLabelMode) -> Result<(), String> {
-    let mut controller = get_controller(&app)?;
-    if controller.has_active_capture() {
-        return Err(format!(
-            "cannot change speaker labels while status is {}",
-            controller.phase.status_text()
-        ));
-    }
+    update_and_save_settings(&app, |controller| {
+        if controller.has_active_capture() {
+            return Err(format!(
+                "cannot change speaker labels while status is {}",
+                controller.phase.status_text()
+            ));
+        }
 
-    controller.settings.speaker_label_mode = mode;
-    controller.status_detail = format!("Speaker labels: {}", mode.menu_label());
-    recorder_settings::save(&app, &controller.settings)?;
-    set_controller(&app, controller)?;
+        controller.settings.speaker_label_mode = mode;
+        controller.status_detail = format!("Speaker labels: {}", mode.menu_label());
+        Ok(())
+    })?;
     refresh_tray(&app);
     Ok(())
 }
@@ -1835,6 +2011,25 @@ pub fn set_meeting_end_reminders_enabled(
     recording_end_reminder_runtime::set_enabled(app, enabled)
 }
 
+pub fn set_meeting_automation_mode(
+    app: tauri::AppHandle,
+    mode: AutomationMode,
+) -> Result<(), String> {
+    update_and_save_settings(&app, |controller| {
+        controller.settings.meeting_automation_mode = mode;
+        controller.status_detail = match mode {
+            AutomationMode::Off => "Meeting detection off",
+            AutomationMode::Ask => "Meeting detection will ask before recording",
+            AutomationMode::AutoScheduled => "Scheduled native calls can auto-record",
+        }
+        .to_string();
+        Ok(())
+    })?;
+    meeting_automation_runtime::set_mode(&app, mode)?;
+    refresh_tray(&app);
+    Ok(())
+}
+
 pub(crate) fn get_controller(app: &tauri::AppHandle) -> Result<AppController, String> {
     let state = app.state::<AppState>();
     let guard = state
@@ -1848,13 +2043,23 @@ pub(crate) fn get_controller(app: &tauri::AppHandle) -> Result<AppController, St
 
 pub(crate) fn set_controller(
     app: &tauri::AppHandle,
-    controller: AppController,
+    mut controller: AppController,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
     let mut guard = state
         .controller
         .lock()
         .map_err(|_| "controller lock poisoned".to_string())?;
+    // Legacy lifecycle paths replace a cloned controller wholesale. Preserve
+    // meeting-automation state, which is updated concurrently by detector and
+    // permission tasks through `update_controller`.
+    if let Some(current) = guard.as_ref() {
+        controller.settings.meeting_automation_mode = current.settings.meeting_automation_mode;
+        controller.settings.calendar_integration_enabled =
+            current.settings.calendar_integration_enabled;
+        controller.permission_snapshot.calendar = current.permission_snapshot.calendar;
+        controller.pending_meeting_prompt_title = current.pending_meeting_prompt_title.clone();
+    }
     *guard = Some(controller);
     Ok(())
 }
@@ -1872,6 +2077,33 @@ pub(crate) fn update_controller<T>(
         .as_mut()
         .ok_or_else(|| "controller not initialized".to_string())?;
     Ok(update(controller))
+}
+
+pub(crate) fn update_and_save_settings<T>(
+    app: &tauri::AppHandle,
+    update: impl FnOnce(&mut AppController) -> Result<T, String>,
+) -> Result<T, String> {
+    update_and_maybe_save_settings(app, |controller| Ok((update(controller)?, true)))
+}
+
+pub(crate) fn update_and_maybe_save_settings<T>(
+    app: &tauri::AppHandle,
+    update: impl FnOnce(&mut AppController) -> Result<(T, bool), String>,
+) -> Result<T, String> {
+    let state = app.state::<AppState>();
+    let _persistence_guard = state
+        .settings_persistence
+        .lock()
+        .map_err(|_| "settings persistence lock poisoned".to_string())?;
+    let (value, settings) = update_controller(app, |controller| {
+        let (value, should_save) = update(controller)?;
+        let settings = should_save.then(|| controller.settings.clone());
+        Ok::<_, String>((value, settings))
+    })??;
+    if let Some(settings) = settings {
+        recorder_settings::save(app, &settings)?;
+    }
+    Ok(value)
 }
 
 fn set_live_transcription_handle(
@@ -1939,6 +2171,7 @@ async fn refresh_permission_statuses(app: tauri::AppHandle, probe_system_audio: 
         initial_controller.settings.system_audio_authorized_hint,
     )
     .await;
+    let calendar = meeting_automation_runtime::calendar_permission_state();
 
     if probe_system_audio {
         tracing::info!(
@@ -1949,43 +2182,54 @@ async fn refresh_permission_statuses(app: tauri::AppHandle, probe_system_audio: 
         );
     }
 
-    let mut controller = match get_controller(&app) {
-        Ok(controller) => controller,
+    let update = update_and_maybe_save_settings(&app, |controller| {
+        let mut changed = false;
+        let mut settings_changed = false;
+        if let Some(next_hint) = system_audio_hint
+            && next_hint != controller.settings.system_audio_authorized_hint
+        {
+            controller.settings.system_audio_authorized_hint = next_hint;
+            changed = true;
+            settings_changed = true;
+        }
+
+        let calendar_permission_changed = controller.permission_snapshot.calendar != calendar;
+        let permission_changed = controller.permission_snapshot.microphone != microphone
+            || controller.permission_snapshot.system_audio != system_audio
+            || calendar_permission_changed;
+        if permission_changed {
+            controller.permission_snapshot.microphone = microphone;
+            controller.permission_snapshot.system_audio = system_audio;
+            controller.permission_snapshot.calendar = calendar;
+            changed = true;
+        }
+        Ok((
+            (changed, permission_changed, calendar_permission_changed),
+            settings_changed,
+        ))
+    });
+    let (changed, permission_changed, calendar_permission_changed) = match update {
+        Ok(update) => update,
         Err(error) => {
-            tracing::error!("permissions refresh: latest controller unavailable: {error}");
+            tracing::error!("permissions refresh: failed updating controller: {error}");
             return;
         }
     };
-    let mut changed = false;
 
-    if let Some(next_hint) = system_audio_hint
-        && next_hint != controller.settings.system_audio_authorized_hint
-    {
-        controller.settings.system_audio_authorized_hint = next_hint;
-        changed = true;
-        if let Err(error) = recorder_settings::save(&app, &controller.settings) {
-            tracing::warn!("permissions refresh: failed persisting system audio hint: {error}");
+    if permission_changed {
+        if let Err(error) =
+            meeting_automation_runtime::permissions_changed(&app, calendar_permission_changed)
+        {
+            tracing::debug!(%error, "failed resetting meeting detector after permission change");
         }
-    }
-
-    let was_same = controller.permission_snapshot.microphone == microphone
-        && controller.permission_snapshot.system_audio == system_audio;
-    if was_same {
-        if !changed {
-            return;
-        }
-    } else {
         tracing::info!(
             microphone = ?microphone,
             system_audio = ?system_audio,
+            calendar = ?calendar,
             "permissions_snapshot_updated"
         );
-        controller.permission_snapshot.microphone = microphone;
-        controller.permission_snapshot.system_audio = system_audio;
     }
-
-    if let Err(error) = set_controller(&app, controller) {
-        tracing::error!("permissions refresh: failed to store state: {error}");
+    if !changed {
         return;
     }
     refresh_tray(&app);
