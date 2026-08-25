@@ -91,6 +91,37 @@ fn plan_cleans_finalized_chunks_and_stems_only_after_validation() {
 }
 
 #[test]
+fn plan_preserves_session_stems_but_still_cleans_derived_chunks() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let session = final_session(dir.path(), "session-1");
+    write_session_json_with_policy(&session, "session-1", true);
+    fs::create_dir_all(session.join("transcript_chunks")).expect("chunks dir");
+    fs::write(
+        session.join("transcript_chunks").join("chunk-0000.wav"),
+        [1u8; 10],
+    )
+    .expect("chunk");
+    write_mono_wav(&session.join("audio_mic.wav"), 1, 0.4).expect("mic");
+    write_mono_wav(&session.join("audio_spk.wav"), 1, 0.35).expect("system");
+
+    let plan = maintenance_plan(dir.path(), Utc::now()).expect("plan");
+
+    assert!(plan.actions.iter().all(|action| action.kind != "stemWav"));
+    assert!(
+        plan.actions
+            .iter()
+            .any(|action| action.kind == "transcriptChunks")
+    );
+    assert_eq!(
+        plan.skipped
+            .iter()
+            .filter(|skipped| skipped.reason.contains("preserveStems"))
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn plan_skips_source_wav_when_duration_mismatches_mixed_mp3() {
     let dir = tempfile::tempdir().expect("temp dir");
     let session = final_session(dir.path(), "session-1");
@@ -196,6 +227,35 @@ fn maintain_trashes_capture_scratch_audio_after_final_archive_validation() {
     );
     assert!(!capture.path().join("audio_mic.wav").exists());
     assert!(trash.path().join("audio_mic.wav").exists());
+}
+
+#[test]
+fn maintain_never_trashes_output_or_capture_stems_when_policy_preserves_them() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let trash = tempfile::tempdir().expect("trash");
+    let capture = tempfile::tempdir().expect("capture");
+    let session = final_session(dir.path(), "session-1");
+    write_session_json_with_capture_and_policy(&session, "session-1", capture.path(), true);
+    for stem in ["audio_mic.wav", "audio_mic_processed.wav", "audio_spk.wav"] {
+        write_mono_wav(&session.join(stem), 1, 0.4).expect("output stem");
+        write_mono_wav(&capture.path().join(stem), 1, 0.4).expect("capture stem");
+    }
+
+    let result = maintain_with_trash(
+        dir.path(),
+        Utc::now(),
+        &FakeTrash {
+            root: trash.path().to_path_buf(),
+        },
+    )
+    .expect("maintain");
+
+    assert!(result.moved_to_trash.is_empty());
+    for stem in ["audio_mic.wav", "audio_mic_processed.wav", "audio_spk.wav"] {
+        assert!(session.join(stem).exists(), "missing output {stem}");
+        assert!(capture.path().join(stem).exists(), "missing capture {stem}");
+        assert!(!trash.path().join(stem).exists(), "trashed {stem}");
+    }
 }
 
 #[test]
@@ -442,6 +502,30 @@ fn write_session_json_with_capture(session: &Path, id: &str, capture_dir: &Path)
         session.join("session.json"),
         format!(
             r#"{{"id":"{id}","status":"done","captureDir":"{}"}}"#,
+            capture_dir.to_string_lossy()
+        ),
+    )
+    .expect("session json");
+}
+
+fn write_session_json_with_policy(session: &Path, id: &str, preserve_stems: bool) {
+    fs::write(
+        session.join("session.json"),
+        format!(r#"{{"id":"{id}","status":"done","preserveStems":{preserve_stems}}}"#),
+    )
+    .expect("session json");
+}
+
+fn write_session_json_with_capture_and_policy(
+    session: &Path,
+    id: &str,
+    capture_dir: &Path,
+    preserve_stems: bool,
+) {
+    fs::write(
+        session.join("session.json"),
+        format!(
+            r#"{{"id":"{id}","status":"done","captureDir":"{}","preserveStems":{preserve_stems}}}"#,
             capture_dir.to_string_lossy()
         ),
     )

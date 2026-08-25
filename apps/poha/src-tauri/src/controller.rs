@@ -8,7 +8,7 @@ use tauri::{AppHandle, Result};
 use tauri_plugin_audio_priority::AudioPriorityPluginExt;
 
 use crate::live_test_diagnostics::LiveTestMode;
-use crate::recorder_settings::{RecorderSettings, SpeakerLabelMode};
+use crate::recorder_settings::{RecorderSettings, RecordingMode, SpeakerLabelMode};
 use crate::recording_end_reminder::RecordingEndReminderState;
 
 pub const TRAY_ID: &str = "poha-tray";
@@ -26,6 +26,8 @@ pub const MENU_ID_PERMISSION_MIC: &str = "poha_permission_mic";
 pub const MENU_ID_PERMISSION_SYSTEM: &str = "poha_permission_system";
 pub const MENU_ID_SPEAKER_FAST: &str = "poha_speaker_fast";
 pub const MENU_ID_SPEAKER_ME_CALL: &str = "poha_speaker_me_call";
+pub const MENU_ID_RECORD_ONLY: &str = "poha_record_only";
+pub const MENU_ID_RECORD_AND_TRANSCRIBE: &str = "poha_record_and_transcribe";
 pub const MENU_ID_TOGGLE_END_REMINDERS: &str = "poha_toggle_end_reminders";
 pub const MENU_ID_QUIT: &str = "poha_quit";
 pub const MENU_ID_REFRESH: &str = "poha_refresh";
@@ -104,6 +106,8 @@ pub struct AppController {
     pub active_session_id: Option<String>,
     pub recording_started_at: Option<Instant>,
     pub active_capture_dir: Option<PathBuf>,
+    pub active_output_dir: Option<PathBuf>,
+    pub active_settings_snapshot: Option<RecorderSettings>,
     pub background_transcription_count: usize,
     pub live_test_session_id: Option<String>,
     pub live_test_mode: Option<LiveTestMode>,
@@ -127,6 +131,8 @@ impl AppController {
             active_session_id: None,
             recording_started_at: None,
             active_capture_dir: None,
+            active_output_dir: None,
+            active_settings_snapshot: None,
             background_transcription_count: 0,
             live_test_session_id: None,
             live_test_mode: None,
@@ -151,6 +157,15 @@ impl AppController {
 
     pub fn has_active_work(&self) -> bool {
         self.has_active_capture() || self.background_transcription_count > 0
+    }
+
+    pub fn clear_active_session(&mut self) {
+        self.active_session_id = None;
+        self.recording_started_at = None;
+        self.active_capture_dir = None;
+        self.active_output_dir = None;
+        self.active_settings_snapshot = None;
+        self.recording_end_reminder.clear();
     }
 
     pub fn can_keep_recording(&self) -> bool {
@@ -231,6 +246,7 @@ fn build_menu(app: &AppHandle, controller: &AppController) -> Result<Menu<tauri:
             )?,
             &build_microphone_menu(app, controller)?,
             &build_speaker_labels_menu(app, controller)?,
+            &build_recording_mode_menu(app, controller)?,
             &MenuItem::with_id(
                 app,
                 MENU_ID_TOGGLE_END_REMINDERS,
@@ -295,6 +311,48 @@ fn build_permissions_menu(
         ],
     )?;
     Ok(MenuItemKind::Submenu(menu))
+}
+
+fn build_recording_mode_menu(
+    app: &AppHandle,
+    controller: &AppController,
+) -> Result<MenuItemKind<tauri::Wry>> {
+    let current = controller.settings.recording_mode;
+    let enabled = controller.can_start_recording();
+    let menu = Submenu::with_items(
+        app,
+        "After Recording",
+        true,
+        &[
+            &MenuItem::with_id(
+                app,
+                MENU_ID_RECORD_ONLY,
+                recording_mode_label("Keep Audio Only", current, RecordingMode::RecordOnly),
+                enabled,
+                None::<&str>,
+            )?,
+            &MenuItem::with_id(
+                app,
+                MENU_ID_RECORD_AND_TRANSCRIBE,
+                recording_mode_label(
+                    "Transcribe Locally",
+                    current,
+                    RecordingMode::RecordAndTranscribe,
+                ),
+                enabled,
+                None::<&str>,
+            )?,
+        ],
+    )?;
+    Ok(MenuItemKind::Submenu(menu))
+}
+
+fn recording_mode_label(name: &str, current: RecordingMode, mode: RecordingMode) -> String {
+    if current == mode {
+        format!("✓ {name}")
+    } else {
+        name.to_string()
+    }
 }
 
 fn permission_label(name: &str, state: PermissionState) -> String {
@@ -630,6 +688,26 @@ mod tests {
                 SpeakerLabelMode::FastMixed
             ),
             "Fast"
+        );
+    }
+
+    #[test]
+    fn recording_mode_label_marks_selected_mode() {
+        assert_eq!(
+            recording_mode_label(
+                "Keep Audio Only",
+                RecordingMode::RecordOnly,
+                RecordingMode::RecordOnly,
+            ),
+            "✓ Keep Audio Only"
+        );
+        assert_eq!(
+            recording_mode_label(
+                "Transcribe Locally",
+                RecordingMode::RecordOnly,
+                RecordingMode::RecordAndTranscribe,
+            ),
+            "Transcribe Locally"
         );
     }
 
