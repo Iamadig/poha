@@ -10,20 +10,14 @@ pub(super) struct MacosActivitySource;
 
 impl ActivitySource for MacosActivitySource {
     fn snapshot(&self) -> Result<Vec<ProcessActivity>, NativeActivityCollectionError> {
-        let audio = collect_core_audio_activity();
-        let power = collect_power_assertion_activity();
-
-        match (audio, power) {
-            (Ok(mut audio), Ok(power)) => {
-                audio.extend(power);
-                Ok(audio)
-            }
-            (Ok(audio), Err(_)) => Ok(audio),
-            (Err(_), Ok(power)) => Ok(power),
-            (Err(_), Err(_)) => Err(NativeActivityCollectionError::unavailable(
-                "CoreAudio and IOKit meeting activity sources",
-            )),
-        }
+        // An empty snapshot is meaningful to the stop-suppression policy, so
+        // it must be complete. In particular, IOKit cannot observe browser
+        // calls; treating an empty IOKit result as complete after a CoreAudio
+        // failure could release the manual-stop latch while a call is active.
+        let mut audio = collect_core_audio_activity()?;
+        let power = collect_power_assertion_activity()?;
+        audio.extend(power);
+        Ok(audio)
     }
 }
 

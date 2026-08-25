@@ -108,8 +108,8 @@ trait ActivitySource {
 
 /// Collects strong meeting-application activity evidence.
 ///
-/// On unsupported systems, or if every native source fails, this returns an
-/// error rather than guessing from process names.
+/// On unsupported systems, or if any required native source fails, this
+/// returns an error rather than returning an incomplete snapshot.
 pub fn try_collect_active_meeting_applications()
 -> Result<Vec<ActiveMeetingApplication>, NativeActivityCollectionError> {
     #[cfg(target_os = "macos")]

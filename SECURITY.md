@@ -19,7 +19,7 @@ The person starting a recording is responsible for participant notice and consen
 
 ## Meeting Detection And Calendar Access
 
-Meeting detection defaults to Off. Ask mode prompts before capture. Auto-start Scheduled Native Calls permits automatic capture only for fresh duplex-audio activity from a supported native meeting app with a matching fresh, sanitized calendar occurrence. Power-only native evidence, unscheduled native activity, and all browser activity remain prompt-only.
+Meeting detection defaults to Off. Ask Before Recording prompts before capture. Ask With Calendar Context may enrich that prompt with a fresh, sanitized calendar occurrence, but provider and time cannot prove that the active process is that occurrence. Native, power-only, unscheduled, and browser evidence therefore remain prompt-only; meeting detection never starts capture autonomously.
 
 Native detection uses stable application identifiers and coarse CoreAudio/IOKit activity; it does not inspect window titles, screen contents, URLs, or meeting content. Calendar matching is separately opt-in and requests EventKit full access through the visible macOS permission sheet. Poha queries only a bounded near-current window and reduces matching events to provider, start/end times, and a one-way occurrence hash. Titles, attendees, notes, organizers, locations, raw URLs, meeting IDs, passwords, and URL tokens are not retained or passed into Poha's occurrence model.
 

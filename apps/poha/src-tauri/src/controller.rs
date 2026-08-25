@@ -30,7 +30,7 @@ pub const MENU_ID_SPEAKER_ME_CALL: &str = "poha_speaker_me_call";
 pub const MENU_ID_TOGGLE_END_REMINDERS: &str = "poha_toggle_end_reminders";
 pub const MENU_ID_AUTOMATION_OFF: &str = "poha_automation_off";
 pub const MENU_ID_AUTOMATION_ASK: &str = "poha_automation_ask";
-pub const MENU_ID_AUTOMATION_AUTO_SCHEDULED: &str = "poha_automation_auto_scheduled";
+pub const MENU_ID_AUTOMATION_CALENDAR_ASSISTED: &str = "poha_automation_calendar_assisted";
 pub const MENU_ID_CALENDAR_ACCESS: &str = "poha_calendar_access";
 pub const MENU_ID_TOGGLE_CALENDAR: &str = "poha_toggle_calendar";
 pub const MENU_ID_ACCEPT_DETECTED_MEETING: &str = "poha_accept_detected_meeting";
@@ -356,11 +356,11 @@ fn build_meeting_automation_menu(
     )?)?;
     menu.append(&MenuItem::with_id(
         app,
-        MENU_ID_AUTOMATION_AUTO_SCHEDULED,
+        MENU_ID_AUTOMATION_CALENDAR_ASSISTED,
         automation_mode_label(
-            "Auto-start Scheduled Native Calls",
+            "Ask With Calendar Context",
             current,
-            AutomationMode::AutoScheduled,
+            AutomationMode::CalendarAssisted,
         ),
         true,
         None::<&str>,

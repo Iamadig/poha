@@ -10,7 +10,6 @@ use crate::eventkit_calendar::{
 };
 use crate::meeting_detection::{
     AutomationDecision, AutomationMode, MeetingAutomationPolicy, MeetingEvidence,
-    NativeMeetingEvidence,
 };
 use crate::native_meeting_activity::{
     ActiveMeetingApplication, try_collect_active_meeting_applications,
@@ -90,7 +89,7 @@ pub(crate) fn calendar_generation(app: &tauri::AppHandle) -> Result<u64, String>
     with_runtime(app, |runtime| runtime.calendar_generation)
 }
 
-pub(crate) async fn enable_calendar_for_auto_mode(
+pub(crate) async fn enable_calendar_for_assisted_mode(
     app: tauri::AppHandle,
     expected_generation: u64,
 ) -> Result<(), String> {
@@ -99,13 +98,13 @@ pub(crate) async fn enable_calendar_for_auto_mode(
 
 async fn enable_calendar(
     app: tauri::AppHandle,
-    expected_auto_generation: Option<u64>,
+    expected_assisted_generation: Option<u64>,
 ) -> Result<(), String> {
     let start = with_runtime(&app, |runtime| -> Result<Option<(u64, bool)>, String> {
-        if let Some(expected_generation) = expected_auto_generation {
-            let auto_still_selected = get_controller(&app)?.settings.meeting_automation_mode
-                == AutomationMode::AutoScheduled;
-            if runtime.calendar_generation != expected_generation || !auto_still_selected {
+        if let Some(expected_generation) = expected_assisted_generation {
+            let assisted_still_selected = get_controller(&app)?.settings.meeting_automation_mode
+                == AutomationMode::CalendarAssisted;
+            if runtime.calendar_generation != expected_generation || !assisted_still_selected {
                 return Ok(None);
             }
         }
@@ -113,7 +112,7 @@ async fn enable_calendar(
         Ok(Some((runtime.calendar_generation, cleared_prompt)))
     })??;
     let Some((generation, cleared_prompt)) = start else {
-        return Err("automatic meeting mode changed before calendar access began".to_string());
+        return Err("calendar-assisted meeting mode changed before access began".to_string());
     };
     if cleared_prompt {
         clear_prompt_ui(&app);
@@ -189,7 +188,7 @@ pub(crate) async fn accept_pending_prompt(app: tauri::AppHandle) -> Result<Strin
     }
 
     let controller = get_controller(&app)?;
-    ensure_start_is_allowed(&controller, false)?;
+    ensure_start_is_allowed(&controller)?;
     let (evidence, calendar) = collect_inputs(&app, now_unix_ms, true).await?;
     let validated_now_unix_ms = chrono::Utc::now().timestamp_millis();
     if validated_now_unix_ms.saturating_sub(pending.last_seen_unix_ms) > PROMPT_MAX_AGE_MS {
@@ -237,22 +236,17 @@ pub(crate) async fn accept_pending_prompt(app: tauri::AppHandle) -> Result<Strin
     }
     clear_prompt_ui(&app);
     let latest = get_controller(&app)?;
-    ensure_start_is_allowed(&latest, false)?;
+    ensure_start_is_allowed(&latest)?;
     let required_mode = latest.settings.meeting_automation_mode;
     if required_mode == AutomationMode::Off {
         return Err("meeting detection was turned off before recording started".to_string());
     }
-    let detail = recording_detail(
-        &pending.evidence,
-        pending.scheduled_occurrence.as_ref(),
-        false,
-    );
+    let detail = recording_detail(&pending.evidence, pending.scheduled_occurrence.as_ref());
     match start_recording_for_meeting(
         app.clone(),
         pending.evidence.clone(),
         &detail,
         required_mode,
-        false,
     )
     .await
     {
@@ -261,7 +255,7 @@ pub(crate) async fn accept_pending_prompt(app: tauri::AppHandle) -> Result<Strin
             Ok(session_id)
         }
         Err(error) => {
-            apply_global_cooldown(&app)?;
+            apply_stop_suppression(&app)?;
             Err(error)
         }
     }
@@ -278,14 +272,19 @@ pub(crate) fn dismiss_pending_prompt(app: &tauri::AppHandle) -> Result<(), Strin
     Ok(())
 }
 
-/// Manual and quiet-audio stops use a global cooldown so vendor helper
-/// processes cannot immediately re-trigger the same call under another ID.
+/// Manual and quiet-audio stops remain suppressed until every meeting signal
+/// disappears, followed by a cooldown. Vendor helper identity changes cannot
+/// re-trigger the same call.
 pub(crate) fn recording_stopping(app: &tauri::AppHandle) -> Result<(), String> {
-    apply_global_cooldown(app)?;
+    apply_stop_suppression(app)?;
     clear_pending_prompt(app)
 }
 
 pub(crate) fn recording_started(app: &tauri::AppHandle) -> Result<(), String> {
+    clear_pending_prompt(app)
+}
+
+pub(crate) fn quit_requested(app: &tauri::AppHandle) -> Result<(), String> {
     clear_pending_prompt(app)
 }
 
@@ -323,6 +322,10 @@ async fn poll_once(app: tauri::AppHandle) -> Result<(), String> {
     if mode == AutomationMode::Off {
         return Ok(());
     }
+    if controller.quit_requested {
+        clear_pending_prompt(&app)?;
+        return Ok(());
+    }
     if controller.has_active_capture() {
         clear_pending_prompt(&app)?;
         return Ok(());
@@ -336,63 +339,6 @@ async fn poll_once(app: tauri::AppHandle) -> Result<(), String> {
     })?;
 
     match decision {
-        AutomationDecision::Start {
-            evidence,
-            scheduled_occurrence,
-        } => {
-            let latest = get_controller(&app)?;
-            if let Err(error) = ensure_start_is_allowed(&latest, true) {
-                update_controller(&app, |controller| {
-                    if !controller.has_active_capture() {
-                        controller.status_detail =
-                            "Meeting detected — recording permissions needed".to_string();
-                    }
-                })?;
-                refresh_tray(&app);
-                notify(&app, "Poha needs recording permissions", &error);
-                return Ok(());
-            }
-            if latest.settings.meeting_automation_mode != AutomationMode::AutoScheduled
-                || !latest.settings.calendar_integration_enabled
-            {
-                return Ok(());
-            }
-            let expected_evidence = MeetingEvidence::Native(evidence.clone());
-            let (fresh_evidence, fresh_calendar) = collect_inputs(&app, now_unix_ms, true).await?;
-            let fresh_now_unix_ms = chrono::Utc::now().timestamp_millis();
-            if !automatic_candidate_is_current(
-                &evidence,
-                &scheduled_occurrence,
-                &fresh_evidence,
-                &fresh_calendar,
-                fresh_now_unix_ms,
-            ) {
-                with_runtime(&app, |runtime| runtime.policy.reset_observations())?;
-                return Ok(());
-            }
-
-            let latest = get_controller(&app)?;
-            ensure_start_is_allowed(&latest, true)?;
-            if !latest.settings.calendar_integration_enabled {
-                return Ok(());
-            }
-            let detail = recording_detail(&expected_evidence, Some(&scheduled_occurrence), true);
-            match start_recording_for_meeting(
-                app.clone(),
-                expected_evidence,
-                &detail,
-                AutomationMode::AutoScheduled,
-                true,
-            )
-            .await
-            {
-                Ok(_) => notify(&app, "Poha started recording", &detail),
-                Err(error) => {
-                    apply_global_cooldown(&app)?;
-                    tracing::warn!(%error, "automatic meeting recording did not start");
-                }
-            }
-        }
         AutomationDecision::Prompt {
             evidence,
             scheduled_occurrence,
@@ -441,15 +387,15 @@ async fn collect_inputs(
         Ok(Ok(Ok(applications))) => applications,
         Ok(Ok(Err(error))) => {
             tracing::debug!(%error, "native meeting detector failed closed for this poll");
-            Vec::new()
+            return Err(format!("native meeting detector failed: {error}"));
         }
         Ok(Err(error)) => {
             tracing::debug!(%error, "native meeting detector task failed closed");
-            Vec::new()
+            return Err(format!("native meeting detector task failed: {error}"));
         }
         Err(_) => {
             tracing::debug!("native meeting detector timed out and failed closed");
-            Vec::new()
+            return Err("native meeting detector timed out".to_string());
         }
     };
     let evidence = evidence_from_applications(&applications, &calendar, now_unix_ms);
@@ -555,7 +501,7 @@ fn show_prompt(
     now_unix_ms: i64,
 ) -> Result<(), String> {
     let title = prompt_title(&evidence, scheduled_occurrence.as_ref());
-    with_runtime(app, |runtime| {
+    let generation = with_runtime(app, |runtime| {
         runtime.next_prompt_generation = runtime.next_prompt_generation.wrapping_add(1).max(1);
         runtime.pending_prompt = Some(PendingPrompt {
             generation: runtime.next_prompt_generation,
@@ -563,13 +509,28 @@ fn show_prompt(
             scheduled_occurrence,
             last_seen_unix_ms: now_unix_ms,
         });
+        runtime.next_prompt_generation
     })?;
-    update_controller(app, |controller| {
-        controller.pending_meeting_prompt_title = Some(title.clone());
-        if !controller.has_active_capture() {
-            controller.status_detail = "Meeting detected — confirmation needed".to_string();
+    let shown = update_controller(app, |controller| {
+        if !prompt_is_allowed(controller) {
+            return false;
         }
+        controller.pending_meeting_prompt_title = Some(title.clone());
+        controller.status_detail = "Meeting detected — confirmation needed".to_string();
+        true
     })?;
+    if !shown {
+        with_runtime(app, |runtime| {
+            if runtime
+                .pending_prompt
+                .as_ref()
+                .is_some_and(|prompt| prompt.generation == generation)
+            {
+                runtime.pending_prompt = None;
+            }
+        })?;
+        return Ok(());
+    }
     refresh_tray(app);
     notify(
         app,
@@ -577,6 +538,10 @@ fn show_prompt(
         &format!("Choose “Start: {title}” or “Not Now” from the Poha menu."),
     );
     Ok(())
+}
+
+fn prompt_is_allowed(controller: &crate::controller::AppController) -> bool {
+    !controller.quit_requested && !controller.has_active_capture()
 }
 
 fn refresh_or_clear_prompt(
@@ -618,15 +583,14 @@ fn clear_prompt_ui(app: &tauri::AppHandle) {
     }
 }
 
-fn apply_global_cooldown(app: &tauri::AppHandle) -> Result<(), String> {
-    let now_unix_ms = chrono::Utc::now().timestamp_millis();
-    with_runtime(app, |runtime| runtime.policy.manual_stop(None, now_unix_ms))
+fn apply_stop_suppression(app: &tauri::AppHandle) -> Result<(), String> {
+    with_runtime(app, |runtime| runtime.policy.manual_stop())
 }
 
-fn ensure_start_is_allowed(
-    controller: &crate::controller::AppController,
-    require_auto_scheduled: bool,
-) -> Result<(), String> {
+fn ensure_start_is_allowed(controller: &crate::controller::AppController) -> Result<(), String> {
+    if controller.quit_requested {
+        return Err("cannot start while quit is queued".to_string());
+    }
     if !controller.can_start_recording() {
         return Err(format!(
             "cannot start while status is {}",
@@ -637,11 +601,6 @@ fn ensure_start_is_allowed(
         || controller.permission_snapshot.system_audio != PermissionState::Authorized
     {
         return Err("microphone and system-audio permissions are required".to_string());
-    }
-    if require_auto_scheduled
-        && controller.settings.meeting_automation_mode != AutomationMode::AutoScheduled
-    {
-        return Err("automatic scheduled recording is no longer enabled".to_string());
     }
     Ok(())
 }
@@ -695,14 +654,9 @@ fn prompt_title(
 fn recording_detail(
     evidence: &MeetingEvidence,
     scheduled_occurrence: Option<&CalendarOccurrence>,
-    automatic: bool,
 ) -> String {
     let title = prompt_title(evidence, scheduled_occurrence);
-    if automatic {
-        format!("Auto-recording {title}")
-    } else {
-        format!("Recording {title}")
-    }
+    format!("Recording {title}")
 }
 
 fn provider_name(provider: MeetingProvider) -> &'static str {
@@ -724,33 +678,6 @@ fn same_evidence_identity(left: &MeetingEvidence, right: &MeetingEvidence) -> bo
         }
         _ => false,
     }
-}
-
-fn automatic_candidate_is_current(
-    expected_evidence: &NativeMeetingEvidence,
-    expected_occurrence: &CalendarOccurrence,
-    fresh_evidence: &[MeetingEvidence],
-    fresh_calendar: &[CalendarOccurrence],
-    now_unix_ms: i64,
-) -> bool {
-    expected_evidence.strength.permits_automatic_start()
-        && fresh_evidence.iter().any(|current| {
-            matches!(
-                current,
-                MeetingEvidence::Native(current)
-                    if current.provider == expected_evidence.provider
-                        && current.application_id == expected_evidence.application_id
-                        && current.strength.permits_automatic_start()
-            )
-        })
-        && select_occurrence(
-            fresh_calendar,
-            expected_evidence.provider,
-            now_unix_ms,
-            SCHEDULE_EARLY_TOLERANCE_MS,
-            SCHEDULE_LATE_TOLERANCE_MS,
-        )
-        .is_some_and(|current| current.occurrence_id_hash == expected_occurrence.occurrence_id_hash)
 }
 
 /// Removes all in-memory calendar data and any prompt whose context came from
@@ -800,10 +727,14 @@ fn with_runtime<T>(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
+    use crate::controller::AppController;
     use crate::meeting_detection::{
         BrowserMeetingEvidence, NativeActivityStrength, NativeMeetingEvidence,
     };
+    use crate::recorder_settings::RecorderSettings;
 
     fn occurrence(provider: MeetingProvider, now: i64) -> CalendarOccurrence {
         CalendarOccurrence {
@@ -872,51 +803,20 @@ mod tests {
     }
 
     #[test]
-    fn automatic_candidate_requires_fresh_duplex_evidence_and_same_occurrence() {
-        let now = 100_000;
-        let native = NativeMeetingEvidence {
-            provider: MeetingProvider::Zoom,
-            application_id: "us.zoom.xos".to_string(),
-            strength: NativeActivityStrength::DuplexAudio,
-        };
-        let scheduled = occurrence(MeetingProvider::Zoom, now);
-        let evidence = vec![MeetingEvidence::Native(native.clone())];
-        assert!(automatic_candidate_is_current(
-            &native,
-            &scheduled,
-            &evidence,
-            std::slice::from_ref(&scheduled),
-            now,
-        ));
-        assert!(!automatic_candidate_is_current(
-            &native,
-            &scheduled,
-            &[],
-            std::slice::from_ref(&scheduled),
-            now,
-        ));
+    fn queued_quit_blocks_automation_prompt_acceptance() {
+        let mut controller = AppController::new(
+            RecorderSettings::default_with_recordings_dir(PathBuf::from("/tmp/poha-tests")),
+            None,
+        );
+        controller.permission_snapshot.microphone = PermissionState::Authorized;
+        controller.permission_snapshot.system_audio = PermissionState::Authorized;
+        controller.quit_requested = true;
 
-        let power_only = MeetingEvidence::Native(NativeMeetingEvidence {
-            strength: NativeActivityStrength::PowerAssertionOnly,
-            ..native.clone()
-        });
-        assert!(!automatic_candidate_is_current(
-            &native,
-            &scheduled,
-            &[power_only],
-            std::slice::from_ref(&scheduled),
-            now,
-        ));
-
-        let mut replacement = scheduled.clone();
-        replacement.occurrence_id_hash = "replacement".to_string();
-        assert!(!automatic_candidate_is_current(
-            &native,
-            &scheduled,
-            &evidence,
-            &[replacement],
-            now,
-        ));
+        assert!(!prompt_is_allowed(&controller));
+        assert_eq!(
+            ensure_start_is_allowed(&controller),
+            Err("cannot start while quit is queued".to_string())
+        );
     }
 
     #[test]

@@ -72,7 +72,7 @@ You are responsible for obtaining any participant consent and complying with rec
 
 ## Meeting Detection
 
-Meeting detection is opt-in and defaults to **Off**. **Ask Before Recording** displays a consent prompt after stable meeting evidence. **Auto-start Scheduled Native Calls** can start automatically only when a supported native meeting app has fresh duplex-audio activity and matches a fresh, sanitized calendar occurrence. Weaker native signals, unscheduled native calls, and all browser activity always require a prompt; browser activity never auto-starts recording.
+Meeting detection is opt-in and defaults to **Off**. **Ask Before Recording** displays a consent prompt after stable meeting evidence. **Ask With Calendar Context** adds a fresh, sanitized calendar occurrence to that confirmation flow when one is available. Native activity, weaker power-only signals, unscheduled calls, and all browser activity always require an explicit prompt; calendar provider and time alone never authorize recording.
 
 Calendar matching is separately opt-in and opens the visible macOS EventKit full-access permission sheet. Poha queries only a fixed near-current time window. It immediately reduces recognized Zoom, Teams, Meet, or Webex events to provider, start/end times, and a one-way occurrence hash. Titles, attendees, notes, organizers, locations, and raw meeting URLs are not retained or passed into Poha's occurrence model.
 

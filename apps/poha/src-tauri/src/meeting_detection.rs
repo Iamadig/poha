@@ -11,7 +11,8 @@ pub enum AutomationMode {
     #[default]
     Off,
     Ask,
-    AutoScheduled,
+    /// Calendar-assisted confirmation; never starts capture autonomously.
+    CalendarAssisted,
 }
 
 #[derive(Debug, Clone)]
@@ -60,12 +61,6 @@ pub enum NativeActivityStrength {
     PowerAssertionOnly,
     /// CoreAudio reports both active input and output for the application.
     DuplexAudio,
-}
-
-impl NativeActivityStrength {
-    pub fn permits_automatic_start(self) -> bool {
-        self == Self::DuplexAudio
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -153,6 +148,7 @@ impl Default for AutomationPolicyConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptReason {
     AskMode,
+    ScheduledNativeRequiresConsent,
     NativeMeetingIsUnscheduled,
     NativeEvidenceRequiresConsent,
     BrowserRequiresConsent,
@@ -164,6 +160,7 @@ pub enum NoActionReason {
     NoEvidence,
     Debouncing,
     Cooldown,
+    SuppressedUntilEvidenceEnds,
     AlreadyHandled,
 }
 
@@ -175,12 +172,6 @@ pub enum AutomationDecision {
         scheduled_occurrence: Option<CalendarOccurrence>,
         reason: PromptReason,
     },
-    /// Only native evidence can inhabit Start. Browser evidence is excluded by
-    /// the type system and always flows through Prompt.
-    Start {
-        evidence: NativeMeetingEvidence,
-        scheduled_occurrence: CalendarOccurrence,
-    },
 }
 
 #[derive(Debug, Clone)]
@@ -190,6 +181,8 @@ pub struct MeetingAutomationPolicy {
     latched: BTreeSet<MeetingEvidence>,
     cooldown_until: BTreeMap<MeetingEvidence, i64>,
     global_cooldown_until: Option<i64>,
+    suppress_until_no_evidence: bool,
+    consecutive_empty_hits: u8,
 }
 
 impl Default for MeetingAutomationPolicy {
@@ -210,6 +203,8 @@ impl MeetingAutomationPolicy {
             latched: BTreeSet::new(),
             cooldown_until: BTreeMap::new(),
             global_cooldown_until: None,
+            suppress_until_no_evidence: false,
+            consecutive_empty_hits: 0,
         }
     }
 
@@ -247,6 +242,26 @@ impl MeetingAutomationPolicy {
             .filter(|evidence| evidence.has_identity())
             .cloned()
             .collect::<BTreeSet<_>>();
+
+        if self.suppress_until_no_evidence {
+            self.reset_transient_state();
+            if observed.is_empty() {
+                self.consecutive_empty_hits = self.consecutive_empty_hits.saturating_add(1);
+                if self.consecutive_empty_hits < self.config.required_consecutive_hits {
+                    return AutomationDecision::NoAction(
+                        NoActionReason::SuppressedUntilEvidenceEnds,
+                    );
+                }
+                self.suppress_until_no_evidence = false;
+                self.consecutive_empty_hits = 0;
+                self.global_cooldown_until =
+                    Some(now_unix_ms.saturating_add(self.config.cooldown_ms));
+                return AutomationDecision::NoAction(NoActionReason::Cooldown);
+            }
+            self.consecutive_empty_hits = 0;
+            return AutomationDecision::NoAction(NoActionReason::SuppressedUntilEvidenceEnds);
+        }
+
         self.consecutive_hits
             .retain(|candidate, _| observed.contains(candidate));
         self.latched
@@ -302,19 +317,11 @@ impl MeetingAutomationPolicy {
                 )
                 .cloned()
             });
-            let rank = match (&candidate, self.config.mode, scheduled.is_some()) {
-                (MeetingEvidence::Native(evidence), AutomationMode::AutoScheduled, true)
-                    if evidence.strength.permits_automatic_start() =>
-                {
-                    0
-                }
-                _ => 1,
-            };
-            ready.push((rank, candidate, scheduled));
+            ready.push((candidate, scheduled));
         }
 
-        ready.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
-        if let Some((_, candidate, scheduled)) = ready.into_iter().next() {
+        ready.sort_by(|left, right| left.0.cmp(&right.0));
+        if let Some((candidate, scheduled)) = ready.into_iter().next() {
             let decision = self.decision_for(candidate.clone(), scheduled);
             self.latched.insert(candidate);
             return decision;
@@ -336,16 +343,14 @@ impl MeetingAutomationPolicy {
         self.cooldown(evidence, now_unix_ms);
     }
 
-    /// A manual stop cools the recording's evidence identity. When the caller
-    /// cannot identify it, a global cooldown prevents any persistent detector
-    /// signal from immediately restarting capture.
-    pub fn manual_stop(&mut self, evidence: Option<&MeetingEvidence>, now_unix_ms: i64) {
-        if let Some(evidence) = evidence {
-            self.cooldown(evidence, now_unix_ms);
-        } else {
-            self.global_cooldown_until = Some(now_unix_ms.saturating_add(self.config.cooldown_ms));
-            self.reset_transient_state();
-        }
+    /// A manual stop remains in force until every meeting signal disappears.
+    /// Only then does the ordinary global cooldown begin. This prevents a long
+    /// call from being offered again merely because a timer elapsed.
+    pub fn manual_stop(&mut self) {
+        self.suppress_until_no_evidence = true;
+        self.consecutive_empty_hits = 0;
+        self.global_cooldown_until = None;
+        self.reset_transient_state();
     }
 
     fn decision_for(
@@ -360,23 +365,19 @@ impl MeetingAutomationPolicy {
                 reason: PromptReason::BrowserRequiresConsent,
             },
             MeetingEvidence::Native(evidence) => match self.config.mode {
-                AutomationMode::AutoScheduled if !evidence.strength.permits_automatic_start() => {
-                    AutomationDecision::Prompt {
-                        evidence: MeetingEvidence::Native(evidence),
-                        scheduled_occurrence,
-                        reason: PromptReason::NativeEvidenceRequiresConsent,
-                    }
-                }
-                AutomationMode::AutoScheduled => match scheduled_occurrence {
-                    Some(scheduled_occurrence) => AutomationDecision::Start {
-                        evidence,
-                        scheduled_occurrence,
+                // Calendar provider + time is useful prompt context, but cannot
+                // bind the active process to that occurrence. Consent is always
+                // required until a trustworthy identity binding exists.
+                AutomationMode::CalendarAssisted => AutomationDecision::Prompt {
+                    reason: if evidence.strength == NativeActivityStrength::PowerAssertionOnly {
+                        PromptReason::NativeEvidenceRequiresConsent
+                    } else if scheduled_occurrence.is_some() {
+                        PromptReason::ScheduledNativeRequiresConsent
+                    } else {
+                        PromptReason::NativeMeetingIsUnscheduled
                     },
-                    None => AutomationDecision::Prompt {
-                        evidence: MeetingEvidence::Native(evidence),
-                        scheduled_occurrence: None,
-                        reason: PromptReason::NativeMeetingIsUnscheduled,
-                    },
+                    evidence: MeetingEvidence::Native(evidence),
+                    scheduled_occurrence,
                 },
                 AutomationMode::Ask => AutomationDecision::Prompt {
                     evidence: MeetingEvidence::Native(evidence),
@@ -516,7 +517,7 @@ mod tests {
 
     #[test]
     fn calendar_data_alone_can_never_start() {
-        let mut policy = MeetingAutomationPolicy::new(config(AutomationMode::AutoScheduled));
+        let mut policy = MeetingAutomationPolicy::new(config(AutomationMode::CalendarAssisted));
         let calendar = [occurrence(MeetingProvider::Zoom, 90, 200, "zoom")];
         for now in [90, 100, 150] {
             assert_eq!(
@@ -527,8 +528,8 @@ mod tests {
     }
 
     #[test]
-    fn auto_scheduled_starts_only_matching_native_evidence() {
-        let mut policy = MeetingAutomationPolicy::new(config(AutomationMode::AutoScheduled));
+    fn calendar_assisted_mode_prompts_for_matching_native_evidence() {
+        let mut policy = MeetingAutomationPolicy::new(config(AutomationMode::CalendarAssisted));
         let evidence = native(MeetingProvider::Zoom);
         let calendar = [
             occurrence(MeetingProvider::Teams, 90, 200, "teams"),
@@ -537,22 +538,23 @@ mod tests {
         policy.observe(&[evidence.clone()], &calendar, 100);
         assert!(matches!(
             policy.observe(&[evidence], &calendar, 101),
-            AutomationDecision::Start {
-                evidence: NativeMeetingEvidence {
+            AutomationDecision::Prompt {
+                evidence: MeetingEvidence::Native(NativeMeetingEvidence {
                     provider: MeetingProvider::Zoom,
                     ..
-                },
-                scheduled_occurrence: CalendarOccurrence {
+                }),
+                scheduled_occurrence: Some(CalendarOccurrence {
                     occurrence_id_hash,
                     ..
-                },
+                }),
+                reason: PromptReason::ScheduledNativeRequiresConsent,
             } if occurrence_id_hash == "zoom"
         ));
     }
 
     #[test]
-    fn unscheduled_native_evidence_prompts_in_auto_scheduled_mode() {
-        let mut policy = MeetingAutomationPolicy::new(config(AutomationMode::AutoScheduled));
+    fn unscheduled_native_evidence_prompts_in_calendar_assisted_mode() {
+        let mut policy = MeetingAutomationPolicy::new(config(AutomationMode::CalendarAssisted));
         let evidence = native(MeetingProvider::Webex);
         policy.observe(&[evidence.clone()], &[], 100);
         assert!(matches!(
@@ -565,8 +567,8 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_native_start_outranks_an_unscheduled_prompt_candidate() {
-        let mut policy = MeetingAutomationPolicy::new(config(AutomationMode::AutoScheduled));
+    fn calendar_context_never_changes_the_consent_requirement() {
+        let mut policy = MeetingAutomationPolicy::new(config(AutomationMode::CalendarAssisted));
         let zoom = native(MeetingProvider::Zoom);
         let teams = native(MeetingProvider::Teams);
         let calendar = [occurrence(MeetingProvider::Teams, 90, 200, "teams")];
@@ -575,11 +577,8 @@ mod tests {
         policy.observe(&evidence, &calendar, 100);
         assert!(matches!(
             policy.observe(&evidence, &calendar, 101),
-            AutomationDecision::Start {
-                evidence: NativeMeetingEvidence {
-                    provider: MeetingProvider::Teams,
-                    ..
-                },
+            AutomationDecision::Prompt {
+                evidence: MeetingEvidence::Native(_),
                 ..
             }
         ));
@@ -587,7 +586,7 @@ mod tests {
 
     #[test]
     fn browser_evidence_always_prompts_even_when_scheduled() {
-        let mut policy = MeetingAutomationPolicy::new(config(AutomationMode::AutoScheduled));
+        let mut policy = MeetingAutomationPolicy::new(config(AutomationMode::CalendarAssisted));
         let evidence = browser(MeetingProvider::Meet);
         let calendar = [occurrence(MeetingProvider::Meet, 90, 200, "meet")];
         policy.observe(&[evidence.clone()], &calendar, 100);
@@ -603,7 +602,7 @@ mod tests {
 
     #[test]
     fn providerless_browser_evidence_still_prompts() {
-        let mut policy = MeetingAutomationPolicy::new(config(AutomationMode::AutoScheduled));
+        let mut policy = MeetingAutomationPolicy::new(config(AutomationMode::CalendarAssisted));
         let evidence = providerless_browser();
         let unrelated_calendar = [occurrence(MeetingProvider::Meet, 90, 200, "meet")];
         policy.observe(&[evidence.clone()], &unrelated_calendar, 100);
@@ -619,8 +618,8 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_power_assertion_only_native_evidence_never_starts() {
-        let mut policy = MeetingAutomationPolicy::new(config(AutomationMode::AutoScheduled));
+    fn scheduled_power_assertion_only_native_evidence_requires_consent() {
+        let mut policy = MeetingAutomationPolicy::new(config(AutomationMode::CalendarAssisted));
         let evidence = power_only_native(MeetingProvider::Zoom);
         let calendar = [occurrence(MeetingProvider::Zoom, 90, 200, "zoom")];
         policy.observe(&[evidence.clone()], &calendar, 100);
@@ -643,7 +642,7 @@ mod tests {
 
     #[test]
     fn duplex_upgrade_is_used_without_resetting_the_debounce_identity() {
-        let mut policy = MeetingAutomationPolicy::new(config(AutomationMode::AutoScheduled));
+        let mut policy = MeetingAutomationPolicy::new(config(AutomationMode::CalendarAssisted));
         let power_only = power_only_native(MeetingProvider::Zoom);
         let duplex = native(MeetingProvider::Zoom);
         let calendar = [occurrence(MeetingProvider::Zoom, 90, 200, "zoom")];
@@ -654,19 +653,20 @@ mod tests {
         );
         assert!(matches!(
             policy.observe(&[duplex], &calendar, 101),
-            AutomationDecision::Start {
-                evidence: NativeMeetingEvidence {
+            AutomationDecision::Prompt {
+                evidence: MeetingEvidence::Native(NativeMeetingEvidence {
                     strength: NativeActivityStrength::DuplexAudio,
                     ..
-                },
-                ..
+                }),
+                reason: PromptReason::ScheduledNativeRequiresConsent,
+                scheduled_occurrence: Some(_),
             }
         ));
     }
 
     #[test]
     fn strength_and_calendar_enrichment_do_not_bypass_identity_cooldowns() {
-        let mut policy = MeetingAutomationPolicy::new(config(AutomationMode::AutoScheduled));
+        let mut policy = MeetingAutomationPolicy::new(config(AutomationMode::CalendarAssisted));
         let power_only = power_only_native(MeetingProvider::Zoom);
         let duplex = native(MeetingProvider::Zoom);
         let calendar = [occurrence(MeetingProvider::Zoom, 90, 200, "zoom")];
@@ -721,18 +721,37 @@ mod tests {
     }
 
     #[test]
-    fn manual_stop_without_identity_applies_global_cooldown() {
+    fn manual_stop_suppresses_for_the_evidence_lifetime_then_cools_down() {
         let mut policy = MeetingAutomationPolicy::new(config(AutomationMode::Ask));
         let evidence = native(MeetingProvider::Zoom);
-        policy.manual_stop(None, 10);
+        policy.manual_stop();
         assert_eq!(
-            policy.observe(&[evidence.clone()], &[], 109),
+            policy.observe(&[evidence.clone()], &[], 10_000),
+            AutomationDecision::NoAction(NoActionReason::SuppressedUntilEvidenceEnds),
+            "an active call must stay suppressed even long after the cooldown duration"
+        );
+        assert_eq!(
+            policy.observe(&[], &[], 10_001),
+            AutomationDecision::NoAction(NoActionReason::SuppressedUntilEvidenceEnds),
+            "one empty poll is not enough to prove that the call ended"
+        );
+        assert_eq!(
+            policy.observe(&[], &[], 10_002),
+            AutomationDecision::NoAction(NoActionReason::Cooldown),
+            "the cooldown begins only after all evidence disappears"
+        );
+        assert_eq!(
+            policy.observe(&[evidence.clone()], &[], 10_101),
             AutomationDecision::NoAction(NoActionReason::Cooldown)
         );
         assert_eq!(
-            policy.observe(&[evidence], &[], 110),
+            policy.observe(&[evidence.clone()], &[], 10_102),
             AutomationDecision::NoAction(NoActionReason::Debouncing)
         );
+        assert!(matches!(
+            policy.observe(&[evidence], &[], 10_103),
+            AutomationDecision::Prompt { .. }
+        ));
     }
 
     #[test]
@@ -745,12 +764,12 @@ mod tests {
             vec![browser.clone(), native.clone()],
             vec![native.clone(), browser.clone()],
         ] {
-            let mut policy = MeetingAutomationPolicy::new(config(AutomationMode::AutoScheduled));
+            let mut policy = MeetingAutomationPolicy::new(config(AutomationMode::CalendarAssisted));
             policy.observe(&evidence, &schedule, 100);
             assert!(matches!(
                 policy.observe(&evidence, &schedule, 101),
-                AutomationDecision::Start {
-                    evidence: NativeMeetingEvidence { .. },
+                AutomationDecision::Prompt {
+                    evidence: MeetingEvidence::Native(NativeMeetingEvidence { .. }),
                     ..
                 }
             ));
