@@ -2,7 +2,7 @@
 
 ![Poha hero](assets/promo/github-hero.png)
 
-Poha is a local-first macOS menu bar meeting recorder. It captures mic and system audio, transcribes locally, writes durable session files, and gives agents a JSON CLI for reading meeting memory safely.
+Poha is a local-first macOS menu bar meeting recorder. It captures mic and system audio, preserves durable session files, supports optional local transcription, and gives agents a JSON CLI for reading meeting memory safely.
 
 Poha is for breakfast. It is also for founders who want meeting notes without another SaaS seat.
 
@@ -10,15 +10,15 @@ Poha is for breakfast. It is also for founders who want meeting notes without an
 
 ![Poha feature thali](assets/promo/poha-feature-thali.png)
 
-- Records mic and system audio from a macOS menu bar app.
-- Transcribes locally with `mlx-whisper` in speech-boundary chunks.
+- Records mic and system audio from a macOS menu bar app and preserves validated WAV stems.
+- Supports local transcription with `mlx-whisper` in speech-boundary chunks.
 - Writes inspectable artifacts: `summary.md`, `transcript.md`, `transcript.json`, `meeting.json`, audio, and SQLite metadata.
 - Supports `Me + Call` speaker modes with separate mic/system stems.
 - Runs guided audio diagnostics for mic, system audio, timing, and transcript checks.
 - Keeps storage tidy by moving safe-to-clean artifacts to macOS Trash, not hard-deleting them.
 - Exposes `poha-cli` for stable JSON reads and constrained agent-safe writes.
 - Can invoke Codex for bulk enrichment of missing or stale meeting summaries.
-- Defaults local: recording and transcription run on your Mac; no analytics are included.
+- Defaults local: recording and optional transcription run on your Mac; no analytics are included.
 
 ## Install With Your Agent
 
@@ -67,6 +67,14 @@ poha-cli diagnostics audio --guided
 
 Agent-safe writes are limited to `summary.md`, `meeting.json`, `.poha/meetings.sqlite`, and `.poha/exports`. Poha does not let the CLI rewrite audio, `session.json`, or transcript evidence.
 
+You are responsible for obtaining any participant consent and complying with recording laws and organizational policies before starting capture.
+
+## Recording Modes
+
+New installs default to **Record Only**. Existing settings created before `recordingMode` was added retain the app's earlier Record-and-Transcribe behavior, and explicit choices remain unchanged. Choose **After Recording → Keep Audio Only** or **Transcribe Locally** from the menu bar. Legacy session manifests that lack a recording-mode field are interpreted as Record-and-Transcribe so interrupted older sessions can be recovered consistently.
+
+Record Only archives and validates separate microphone and system-audio stems without running transcription. Stem preservation defaults on for new settings and older settings that lack `preserveStems`; an explicit false value remains respected. Session manifests record the durable paths for `audio_mic.wav`, optional `audio_mic_processed.wav`, and `audio_spk.wav`.
+
 ## Codex Integration
 
 Poha can ask Codex to enrich meetings that need summaries. The app finds missing or stale summaries, invokes the local `codex` CLI, lets Codex read transcripts from the recordings directory, and writes the result back through `poha-cli`.
@@ -88,6 +96,9 @@ Codex enrichment is external AI processing according to your Codex account and b
 Each recording session is file-backed. Important outputs:
 
 - `session.json`
+- `audio_mic.wav`
+- `audio_mic_processed.wav` when available
+- `audio_spk.wav`
 - `meeting.json`
 - `summary.md`
 - `transcript.md`
@@ -115,7 +126,7 @@ pnpm poha:build
 
 ## Privacy
 
-Poha records and transcribes locally. The standalone app does not include analytics or remote crash reporting.
+Poha records locally and transcribes locally when transcription is enabled. The standalone app does not include analytics or remote crash reporting.
 
 Codex enrichment is optional and uses the local `codex` CLI. Treat it as external AI processing according to your Codex account and backend settings.
 
