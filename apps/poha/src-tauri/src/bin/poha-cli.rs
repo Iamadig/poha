@@ -12,6 +12,8 @@ mod output;
 mod storage;
 
 use output::{emit_failure, emit_success};
+use poha_lib::control_protocol::{ControlCommand, ControlResult, StopTarget};
+use poha_lib::control_socket::{ControlClient, ControlPaths, default_control_paths};
 use poha_lib::meeting_store::{
     ApplySpeakerMapRequest, ExportMeetingsRequest, ImportArchiveRequest,
     UpdateMeetingMetadataRequest, apply_speaker_map, copy_context_for_llm, copy_meeting_for_llm,
@@ -27,6 +29,8 @@ const SCHEMA_VERSION: u32 = 1;
 struct Cli {
     #[arg(long, env = "POHA_RECORDINGS_DIR", global = true)]
     recordings_dir: Option<PathBuf>,
+    #[arg(long, env = "POHA_CONTROL_DIR", global = true)]
+    control_dir: Option<PathBuf>,
     #[arg(
         long,
         global = true,
@@ -57,6 +61,10 @@ enum Command {
     Diagnostics {
         #[command(subcommand)]
         command: DiagnosticsCommand,
+    },
+    Recording {
+        #[command(subcommand)]
+        command: RecordingCommand,
     },
 }
 
@@ -94,6 +102,30 @@ enum StorageCommand {
 #[derive(Subcommand)]
 enum DiagnosticsCommand {
     Audio(DiagnosticsAudioArgs),
+}
+
+#[derive(Subcommand)]
+enum RecordingCommand {
+    Status,
+    Start(RecordingStartArgs),
+    Stop(RecordingStopArgs),
+}
+
+#[derive(Args)]
+struct RecordingStartArgs {
+    #[arg(
+        long,
+        help = "Stable retry key. A random UUID is generated when this is omitted."
+    )]
+    idempotency_key: Option<String>,
+}
+
+#[derive(Args)]
+struct RecordingStopArgs {
+    #[arg(long, conflicts_with = "current", required_unless_present = "current")]
+    session: Option<String>,
+    #[arg(long, conflicts_with = "session", required_unless_present = "session")]
+    current: bool,
 }
 
 #[derive(Args)]
@@ -368,9 +400,19 @@ struct DiagnosticsAudioResult {
     expected_report_files: Vec<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecordingControlOutput {
+    #[serde(flatten)]
+    result: ControlResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    idempotency_key: Option<String>,
+}
+
 fn main() {
     let cli = Cli::parse();
     let command_name = command_name(&cli.command);
+    let control_dir = cli.control_dir;
     let ctx = Context::new(cli.recordings_dir);
     let _json_output = cli.json;
     let result = match cli.command {
@@ -381,6 +423,9 @@ fn main() {
         Command::Meetings { command } => run_meeting_command(&command_name, command, &ctx),
         Command::Storage { command } => run_storage_command(&command_name, command, &ctx),
         Command::Diagnostics { command } => run_diagnostics_command(&command_name, command, &ctx),
+        Command::Recording { command } => {
+            run_recording_command(&command_name, command, &ctx, control_dir.as_deref())
+        }
     };
 
     if let Err(error) = result {
@@ -423,6 +468,12 @@ fn command_name(command: &Command) -> String {
         .to_string(),
         Command::Diagnostics { command } => match command {
             DiagnosticsCommand::Audio(_) => "diagnostics.audio",
+        }
+        .to_string(),
+        Command::Recording { command } => match command {
+            RecordingCommand::Status => "recording.status",
+            RecordingCommand::Start(_) => "recording.start",
+            RecordingCommand::Stop(_) => "recording.stop",
         }
         .to_string(),
     }
@@ -864,6 +915,65 @@ fn meeting_copy_format_name(format: &MeetingCopyFormat) -> &'static str {
     match format {
         MeetingCopyFormat::Llm => "llm",
     }
+}
+
+fn run_recording_command(
+    command_name: &str,
+    command: RecordingCommand,
+    ctx: &Context,
+    control_dir: Option<&Path>,
+) -> Result<(), CliError> {
+    let (operation, idempotency_key) = match command {
+        RecordingCommand::Status => (ControlCommand::Status, None),
+        RecordingCommand::Start(args) => {
+            let key = args
+                .idempotency_key
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            (
+                ControlCommand::Start {
+                    idempotency_key: key.clone(),
+                },
+                Some(key),
+            )
+        }
+        RecordingCommand::Stop(args) => {
+            let target = match args.session {
+                Some(session_id) => StopTarget::Session { session_id },
+                None if args.current => StopTarget::Current,
+                None => {
+                    return Err(CliError::new(
+                        "controlInvalidRequest",
+                        "recording stop requires --current or --session <id>".to_string(),
+                    ));
+                }
+            };
+            (ControlCommand::Stop { target }, None)
+        }
+    };
+
+    let paths = match control_dir {
+        Some(control_dir) => ControlPaths::new(control_dir),
+        None => default_control_paths().map_err(|error| {
+            CliError::new(
+                "controlUnavailable",
+                format!("failed resolving control directory: {error}"),
+            )
+        })?,
+    };
+    let client = ControlClient::discover(paths)
+        .map_err(|error| CliError::new(error.code(), error.to_string()))?;
+    let result = client
+        .call(operation)
+        .map_err(|error| CliError::new(error.code(), error.to_string()))?;
+    emit_success(
+        command_name,
+        RecordingControlOutput {
+            result,
+            idempotency_key,
+        },
+        ctx,
+        vec![],
+    )
 }
 
 fn run_diagnostics_command(
@@ -1310,7 +1420,20 @@ fn spec() -> Value {
             "storage.report": { "writes": [], "options": ["--limit"] },
             "storage.audioQuality": { "writes": [], "options": ["--limit", "--all", "--full"] },
             "storage.maintain": { "writes": [], "options": ["--dry-run"] },
-            "diagnostics.audio": { "writes": ["live-test-report.json", "live-test-report.md"], "options": ["--guided"] }
+            "diagnostics.audio": { "writes": ["live-test-report.json", "live-test-report.md"], "options": ["--guided"] },
+            "recording.status": { "writes": [], "transport": "sameUserUnixSocket" },
+            "recording.start": {
+                "stateful": true,
+                "captureSources": ["microphone", "systemAudio"],
+                "createsEvidence": ["audio files", "session.json"],
+                "options": ["--idempotency-key"]
+            },
+            "recording.stop": {
+                "stateful": true,
+                "captureSources": ["microphone", "systemAudio"],
+                "finalizesEvidence": ["audio files", "session.json"],
+                "requiresOneOf": ["--current", "--session <id>"]
+            }
         },
         "safety": {
             "contract": "Agents may organize and annotate Poha meetings, but must not rewrite source evidence.",
@@ -1324,7 +1447,10 @@ fn spec() -> Value {
             ],
             "writableFiles": ["summary.md", "meeting.json", ".poha/meetings.sqlite", ".poha/exports"],
             "agentSafeWrites": ["summary.md", "meeting.json", ".poha/meetings.sqlite", ".poha/exports"],
-            "forbiddenWrites": ["audio files", "transcript.md", "transcript.json", "transcript.partial.md", "transcript.live.json", "transcript.chunks.json", "session.json"]
+            "forbiddenWrites": ["audio files", "transcript.md", "transcript.json", "transcript.partial.md", "transcript.live.json", "transcript.chunks.json", "session.json"],
+            "statefulCaptureCommands": ["recording.start", "recording.stop"],
+            "captureConsent": "Recording commands control microphone and system-audio capture and require the user's authorization and applicable participant consent.",
+            "controlTrust": "The local control socket trusts processes running as this macOS user; do not expose its private control directory to other accounts."
         }
     })
 }
@@ -1343,6 +1469,7 @@ fn capabilities() -> Value {
             "sessions.list",
             "sessions.get",
             "sessions.status",
+            "recording.status",
             "meetings.list",
             "meetings.get",
             "meetings.context",
@@ -1351,6 +1478,16 @@ fn capabilities() -> Value {
             "storage.audioQuality",
             "storage.maintain"
         ],
+        "statefulCommands": {
+            "recording.start": {
+                "effect": "starts microphone and system-audio capture",
+                "idempotencyKey": "accepted from --idempotency-key or generated by the CLI"
+            },
+            "recording.stop": {
+                "effect": "stops and finalizes microphone and system-audio capture",
+                "target": "requires --current or --session <id>"
+            }
+        },
         "writeCommands": {
             "sessions.updateNotes": ["summary.md"],
             "sessions.appendNotes": ["summary.md"],
@@ -1363,6 +1500,7 @@ fn capabilities() -> Value {
         },
         "safety": {
             "principle": "Codex can annotate, organize, and export. It must not rewrite source evidence.",
+            "controlTrust": "Recording control is local-only and trusts processes running as this macOS user.",
             "preferredWritePath": "meeting.json",
             "derivedIndex": ".poha/meetings.sqlite",
             "readOnlyEvidence": [
@@ -1480,6 +1618,9 @@ mod tests {
         assert!(commands.get("meetings.reindex").is_some());
         assert!(commands.get("storage.audioQuality").is_some());
         assert!(commands.get("diagnostics.audio").is_some());
+        assert!(commands.get("recording.status").is_some());
+        assert!(commands.get("recording.start").is_some());
+        assert!(commands.get("recording.stop").is_some());
         assert!(
             commands
                 .get("meetings.list")
@@ -1535,6 +1676,46 @@ mod tests {
                 .and_then(|value| value.get("meetings.update"))
                 .is_some()
         );
+        assert!(
+            value
+                .get("statefulCommands")
+                .and_then(|value| value.get("recording.start"))
+                .is_some()
+        );
+        assert!(
+            value
+                .get("statefulCommands")
+                .and_then(|value| value.get("recording.stop"))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn recording_stop_requires_explicit_target() {
+        let missing = Cli::try_parse_from(["poha-cli", "recording", "stop"]);
+        assert!(missing.is_err());
+
+        let current = Cli::try_parse_from(["poha-cli", "recording", "stop", "--current"])
+            .expect("parse current stop");
+        assert!(matches!(
+            current.command,
+            Command::Recording {
+                command: RecordingCommand::Stop(RecordingStopArgs { current: true, .. })
+            }
+        ));
+
+        let session =
+            Cli::try_parse_from(["poha-cli", "recording", "stop", "--session", "session-1"])
+                .expect("parse session stop");
+        assert!(matches!(
+            session.command,
+            Command::Recording {
+                command: RecordingCommand::Stop(RecordingStopArgs {
+                    session: Some(_),
+                    ..
+                })
+            }
+        ));
     }
 
     #[test]

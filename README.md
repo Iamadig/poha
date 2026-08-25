@@ -63,9 +63,17 @@ poha-cli sessions list
 poha-cli sessions get <session-id> --partial
 poha-cli storage maintain --dry-run
 poha-cli diagnostics audio --guided
+poha-cli recording status
+poha-cli recording start --idempotency-key <retry-key>
+poha-cli recording stop --current
+poha-cli recording stop --session <session-id>
 ```
 
 Agent-safe writes are limited to `summary.md`, `meeting.json`, `.poha/meetings.sqlite`, and `.poha/exports`. Poha does not let the CLI rewrite audio, `session.json`, or transcript evidence.
+
+`recording status` is read-only. `recording start` and `recording stop` are stateful commands that control microphone and system-audio capture in the running Poha app. They use a private same-user Unix socket instead of UI automation. Any process running as your macOS user that can access Poha's control directory is inside that trust boundary, so do not share the directory or its bearer token.
+
+You are responsible for obtaining participant consent and complying with recording laws and organizational policies before starting capture, whether from the menu bar or `poha-cli`.
 
 ## Codex Integration
 
